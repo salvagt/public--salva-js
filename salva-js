@@ -1,0 +1,55 @@
+// SALVA.COACH - widget estático (sin backend)
+(function () {
+  const style = document.createElement('style');
+  style.textContent = `
+    #salva-btn {
+      position: fixed; right: 16px; bottom: 16px;
+      background: #2563eb; color: #fff; border: 0;
+      border-radius: 24px; padding: 12px 16px; font: 600 14px system-ui;
+      box-shadow: 0 6px 18px rgba(0,0,0,.2); cursor: pointer; z-index: 99999;
+    }
+    #salva-panel {
+      position: fixed; right: 16px; bottom: 70px; width: 360px; max-width: calc(100vw - 32px);
+      height: 480px; background: #fff; border-radius: 12px; border: 1px solid #e5e7eb;
+      box-shadow: 0 18px 40px rgba(0,0,0,.25); display: none; z-index: 99999; overflow: auto;
+    }
+    #salva-header {
+      background:#0ea5e9; color:#fff; padding:10px 12px; font:600 14px system-ui; display:flex; align-items:center; justify-content:space-between;
+    }
+    #salva-body { padding: 12px; font: 14px system-ui; color:#111827; }
+    #salva-close { background:transparent; color:#fff; border:none; font:700 18px system-ui; cursor:pointer;}
+    #salva-actions a { display:inline-block; margin:6px 6px 0 0; padding:8px 10px; border-radius:8px; background:#f3f4f6; color:#111827; text-decoration:none; font:600 13px system-ui; }
+    #salva-actions a:hover { background:#e5e7eb; }
+  `;
+  document.head.appendChild(style);
+
+  const btn = document.createElement('button');
+  btn.id = 'salva-btn';
+  btn.textContent = 'SALVA.COACH';
+  document.body.appendChild(btn);
+
+  const panel = document.createElement('div');
+  panel.id = 'salva-panel';
+  panel.innerHTML = `
+    <div id="salva-header">
+      <div>SALVA.COACH</div>
+      <button id="salva-close" title="Cerrar">×</button>
+    </div>
+    <div id="salva-body">
+      <p>¡Hola! Soy tu asistente deportivo 🙂</p>
+      <p>Puedes usarme para guías, enlaces útiles y contacto.</p>
+      <div id="salva-actions">
+        <a href="https://wa.me/XXXXXXXXXXX" target="_blank" rel="noopener">WhatsApp</a>
+        <a href="mailto:tu-correo@dominio.com">Email</a>
+        <a href="https://tus-recursos-o-documentos.com" target="_blank" rel="noopener">Recursos</a>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(panel);
+
+  const close = panel.querySelector('#salva-close');
+  btn.addEventListener('click', () => {
+    panel.style.display = panel.style.display === 'none' || !panel.style.display ? 'block' : 'none';
+  });
+  close.addEventListener('click', () => (panel.style.display = 'none'));
+})();
