@@ -1,4 +1,5 @@
-// server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend) + botón "Enviar resumen" on-demand
+/ server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend)
+// + botón "Enviar resumen" on-demand y auto-envío en cierre
 require('dotenv').config({ override: false });
 const express = require('express');
 const cors = require('cors');
@@ -18,7 +19,7 @@ const HAS_KEY = !!process.env.OPENAI_API_KEY;
 const HAS_PROJECT = !!process.env.OPENAI_PROJECT;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-// SMTP (fallback preferido por ti)
+// SMTP (fallback preferido)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
 const SMTP_USER = process.env.SMTP_USER;
@@ -110,7 +111,7 @@ sessions: Map<sessionId, {
   history: {role:'user'|'assistant', content:string}[],
   packsRecommended: boolean,
   email: string|null,
-  summarySent: boolean,        // si ya se ha enviado el resumen
+  summarySent: boolean,        // si ya se ha enviado el resumen (auto o botón)
   summarySuggested: boolean    // si ya se sugirió el botón
 }>
 */
@@ -188,11 +189,12 @@ async function sendAdminSummary({ sessionId, emailUser, history }) {
     <hr/>
     <p><i>Resumen automático – VELOXTREM</i></p>
   `;
-  await sendMail({
+  const info = await sendMail({
     to: ADMIN_EMAIL,
     subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || 'sin correo'})`,
     html
   });
+  console.log('✉️ sendAdminSummary ->', info);
 }
 
 async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
@@ -225,13 +227,14 @@ async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
     <p>${privacy}</p>
     <p>— ${FROM_NAME} · VELOXTREM</p>
   `;
-  await sendMail({
+  const info = await sendMail({
     to: emailUser,
     subject: (lang === 'en'
       ? 'Your SALVA.COACH summary'
       : 'Tu resumen de la conversación con SALVA.COACH'),
     html
   });
+  console.log('✉️ sendUserReceipt ->', info);
 }
 
 // ===== API: enviar resumen ON-DEMAND (botón) =====
@@ -246,26 +249,16 @@ app.post('/api/send-summary', async (req, res) => {
     const state = getSession(sessionId);
     if (!state) return res.status(404).json({ ok: false, error: 'session_not_found' });
 
-    // Si el usuario mete email en este momento, guárdalo
+    // Posible email proporcionado explícitamente en el click
     const maybeEmail = detectEmail(String(req.body?.email || ''));
     if (maybeEmail && !state.email) state.email = maybeEmail;
 
-    // Enviar siempre al STAFF
-    await sendAdminSummary({
-      sessionId,
-      emailUser: state.email,
-      history: state.history
-    });
-
-    // Enviar al usuario (si hay email)
-    await sendUserReceipt({
-      emailUser: state.email,
-      history: state.history,
-      lang
-    });
+    await sendAdminSummary({ sessionId, emailUser: state.email, history: state.history });
+    await sendUserReceipt({ emailUser: state.email, history: state.history, lang });
 
     state.summarySent = true;
 
+    console.log('✅ /api/send-summary enviado ->', { admin: ADMIN_EMAIL, user: !!state.email, sessionId });
     return res.json({ ok: true, sentTo: { admin: ADMIN_EMAIL, user: !!state.email } });
   } catch (err) {
     console.error('❌ /api/send-summary error:', err?.message || err);
@@ -273,7 +266,7 @@ app.post('/api/send-summary', async (req, res) => {
   }
 });
 
-// ===== API chat (memoria + anti-bucle + sugerencia de envío) =====
+// ===== API chat (memoria + anti-bucle + sugerencia de envío + auto-cierre) =====
 app.post('/api/chat', async (req, res) => {
   try {
     const text = (req.body?.message || '').trim().slice(0, 4000);
@@ -298,8 +291,8 @@ app.post('/api/chat', async (req, res) => {
     const emailFound = detectEmail(text);
     if (emailFound && !state.email) {
       state.email = emailFound;
-      // No enviamos automáticamente hasta cierre
       state.summarySent = false;
+      console.log('📧 Email detectado en chat:', state.email);
     }
 
     // Anti-bucle dinámico
@@ -353,22 +346,20 @@ app.post('/api/chat', async (req, res) => {
     state.history.push({ role: 'assistant', content: reply });
     state.history = trimHistory(state.history);
 
-    // === AUTO-ENVÍO AL DETECTAR CIERRE (insertado) ===
+    // === AUTO-ENVÍO AL DETECTAR CIERRE ===
     const closing = /(gracias|perfecto|genial|ok|de acuerdo|hablamos|listo|vale|hasta luego|buenas noches|nos vemos)\b/i.test(text);
     if (state.email && !state.summarySent && state.packsRecommended && closing) {
       try {
         await sendAdminSummary({ sessionId, emailUser: state.email, history: state.history });
         await sendUserReceipt({ emailUser: state.email, history: state.history, lang });
         state.summarySent = true;
-
-        // Añade aviso al último reply enviado
         const notice = (lang === 'en')
           ? `\n\n✅ I’ve emailed you the summary and forwarded it to the coach.`
           : `\n\n✅ Te acabo de enviar el resumen por email y lo he remitido al entrenador.`;
-        const lastIdx = state.history.length - 1;
-        state.history[lastIdx].content += notice;
-        // Devuelve el reply con el aviso ya incluido
         reply += notice;
+        // Actualiza último mensaje en historial
+        state.history[state.history.length - 1].content = reply;
+        console.log('✅ Auto-summary enviado (cierre detectado):', { sessionId, userEmail: state.email });
       } catch (e) {
         console.error('❌ auto-send summary error:', e?.message || e);
       }
