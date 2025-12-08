@@ -1,145 +1,189 @@
-// server.js — CommonJS (Render + memoria por sesión + tono humano + anti-bucle)
+// server.js — SALVA.COACH con memoria + resumen por correo
 require('dotenv').config({ override: false });
 const express = require('express');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 const OpenAI = require('openai');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-// ===== Diagnóstico ENV (no expone secretos) =====
+// ===== Config =====
 const HAS_KEY = !!process.env.OPENAI_API_KEY;
 const HAS_PROJECT = !!process.env.OPENAI_PROJECT;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-console.log('ENV CHECK =>', { HAS_KEY, HAS_PROJECT, MODEL });
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'salva@veloxtrem.com';
+console.log('ENV CHECK =>', { HAS_KEY, HAS_PROJECT, MODEL, ADMIN_EMAIL });
 
-app.get('/env-check', (_req, res) => {
-  res.json({ ok: true, hasOpenAIKey: HAS_KEY, hasOpenAIProject: HAS_PROJECT, model: MODEL });
-});
-
-// ===== Cliente OpenAI (clave de proyecto + project ID) =====
+// ===== OpenAI client =====
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   project: process.env.OPENAI_PROJECT
 });
 
-// ===== Salud y raíz =====
-app.get('/health', (_req, res) => res.status(200).send('ok'));
-app.get('/', (_req, res) => res.send('✅ SALVA.COACH API activa'));
-
-// ===== Memoria por sesión en RAM =====
-/*
-  sessions: Map<sessionId, {
-    history: {role:'user'|'assistant', content:string}[],
-    packsRecommended: boolean
-  }>
-*/
-const sessions = new Map();
-function getSession(sessionId) {
-  if (!sessionId) return null;
-  if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, { history: [], packsRecommended: false });
+// ===== Nodemailer transporter =====
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT || '465'),
+  secure: true,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
   }
-  return sessions.get(sessionId);
+});
+
+// ===== Memoria por sesión =====
+const sessions = new Map();
+function getSession(id) {
+  if (!id) return null;
+  if (!sessions.has(id)) {
+    sessions.set(id, {
+      history: [],
+      packsRecommended: false,
+      email: null,
+      summarySent: false
+    });
+  }
+  return sessions.get(id);
 }
-function trimHistory(arr, max = 12) {
-  if (arr.length > max) return arr.slice(arr.length - max);
-  return arr;
+function trimHistory(arr, max = 15) {
+  return arr.length > max ? arr.slice(arr.length - max) : arr;
 }
 
-// ===== Prompt humano (con política de avances) =====
-const SALVA_PROMPT_BASE = `
-Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Hablas como persona real, cercano/a, claro/a y profesional. Usa emojis solo si aportan calidez 😊🚴‍♂️💪.
+// ===== Prompt principal =====
+const SALVA_PROMPT = `
+Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Sé humano, natural, empático y profesional. Usa emojis cuando aporten energía positiva 😊🚴‍♂️💪.
 
-ESTILO Y FLUJO:
-1) Saluda breve y pregunta objetivo, disponibilidad y nivel.
-2) Cuando tengas info, recomienda 1–2 packs máximo, priorizando 1 a 1 y Premium. **Hazlo solo una vez** salvo que te lo pidan.
-3) Si ya se han recomendado packs, **no los repitas**; avanza: resuelve dudas, modo entrenador, plan de acción.
-4) Modo entrenador: respuestas prácticas y claras, con ejemplos y porqués.
-5) Cierre / siguiente paso: pide email para enviar propuesta o propone una llamada breve. Despide con cercanía si ya está todo claro.
+OBJETIVO:
+- Guiar al deportista con preguntas sobre su objetivo, experiencia y tiempo disponible.
+- Recomendar solo 1–2 packs (1 a 1 o Premium) y no repetirlos.
+- Entrar en modo entrenador cuando pregunte por entrenamientos o técnica.
+- Si muestra interés, pide su email para enviarle la propuesta.
+- Si ya te da su correo, confírmalo y despídete de forma cercana.
 
-CATÁLOGO (usar cuando toque):
-- 🏅 Pack 1 a 1 VELOXTREM — 100 €/mes. Coaching 1:1, ajustes, contacto directo, análisis potencia/FC.
-- 🔥 Premium VELOXTREM — 150 €/mes. 100% personalizado + nutrición + seguimiento y análisis continuo.
-- 🏔 QH 2026 — 399 € (24 semanas).
-- 💪 Base por FC — 8 semanas (89 €) / 12 semanas (99 €).
-- ⚙️ Fuerza específica por vatios — 69 €.
+PACKS PRINCIPALES:
+1️⃣ Pack 1 a 1 VELOXTREM — 100 €/mes  
+2️⃣ Pack Premium VELOXTREM — 150 €/mes  
 
-POLÍTICA:
-- Prioriza 1 a 1 / Premium si encajan; si no, ofrece 1 alternativa.
-- **No repitas** packs en respuestas consecutivas; continúa la conversación natural.
-- En buen momento pregunta: “¿Te paso propuesta por email o prefieres una llamada breve?”.
-- Recoge email si acepta.
+OTROS:
+🏔 QH 2026 — 399 €  
+💪 Base por FC — 8 semanas (89 €) / 12 semanas (99 €)  
+⚙️ Fuerza específica por vatios — 69 €
+
+CONDICIONES:
+- No repitas packs ya ofrecidos.
+- Si el deportista ya tiene claro su objetivo, avanza: planifica o pide email.
+- Cuando detectes un correo, di algo como “Perfecto, te escribiré ahí para continuar 🚀”.
 `;
 
-// ===== API de chat (con memoria y anti-bucle) =====
+// ===== Detectar correos en el texto =====
+function detectEmail(text) {
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0] : null;
+}
+
+// ===== Enviar resumen =====
+async function sendSummaryEmail(sessionId, emailUser, history) {
+  try {
+    const body = history.map(h =>
+      `<p><b>${h.role === 'user' ? '👤 Deportista:' : '🤖 SALVA:'}</b> ${h.content}</p>`
+    ).join('');
+
+    const html = `
+      <h2>Nuevo contacto desde SALVA.COACH</h2>
+      <p><b>Sesión:</b> ${sessionId}</p>
+      <p><b>Correo del deportista:</b> ${emailUser || '(no proporcionado)'}</p>
+      <hr/>
+      ${body}
+      <hr/>
+      <p><i>Fin del resumen automático - VELOXTREM</i></p>
+    `;
+
+    await transporter.sendMail({
+      from: `"SALVA.COACH" <${process.env.SMTP_USER}>`,
+      to: ADMIN_EMAIL,
+      subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || 'sin correo'})`,
+      html
+    });
+
+    console.log(`📨 Resumen enviado a ${ADMIN_EMAIL}`);
+  } catch (err) {
+    console.error('❌ Error enviando correo resumen:', err.message);
+  }
+}
+
+// ===== API principal =====
 app.post('/api/chat', async (req, res) => {
   try {
-    const userText = (req.body?.message || '').toString().slice(0, 4000);
+    const text = (req.body?.message || '').trim().slice(0, 4000);
     const sessionId = (req.body?.session || '').toString().slice(0, 100);
-    if (!userText) return res.json({ reply: '¿En qué te ayudo? 🙂' });
+    if (!text) return res.json({ reply: '¿En qué puedo ayudarte? 🙂' });
 
-    // Idioma
-    const langQ = (req.query.lang || '').toString().toLowerCase();
-    let lang = langQ.startsWith('en') ? 'en' : (langQ.startsWith('es') ? 'es' : '');
-    if (!lang) lang = /[a-záéíóúñü¿¡]/i.test(userText) ? 'es' : 'en';
+    const lang = (req.query.lang || 'es').startsWith('en') ? 'en' : 'es';
     const prefix = lang === 'en' ? 'Answer in English. ' : 'Responde en español. ';
 
-    // Guardas credenciales
-    if (!HAS_KEY) return res.status(500).json({ error: 'missing_api_key', detail: 'Falta OPENAI_API_KEY en Render.' });
-    if (!HAS_PROJECT) return res.status(500).json({ error: 'missing_project', detail: 'Falta OPENAI_PROJECT en Render.' });
-
-    // Estado de sesión
-    const state = getSession(sessionId) || { history: [], packsRecommended: false };
+    const state = getSession(sessionId);
     state.history = trimHistory(state.history);
 
-    // Instrucción dinámica anti-bucle
-    const ANTI_LOOP = state.packsRecommended
-      ? (lang === 'en'
-        ? 'Note: Packs have already been recommended. Do not re-offer them unless explicitly asked. Keep advancing: coach mode, next steps, ask for email or offer a short call.'
-        : 'Nota: ya se han recomendado packs. No los repitas salvo que te lo pidan. Avanza: modo entrenador, siguientes pasos, pide email o propone llamada breve.')
-      : (lang === 'en'
-        ? 'If you recommend packs, do it only once (1–2 options). After that, do not repeat. Keep a natural flow.'
-        : 'Si recomiendas packs, hazlo una vez (1–2 opciones). Después, no repitas. Mantén flujo natural.');
+    // Detectar correo
+    const emailFound = detectEmail(text);
+    if (emailFound && !state.email) {
+      state.email = emailFound;
+      state.summarySent = false;
+    }
 
-    // Construye mensajes con memoria corta
+    // Anti-bucle
+    const ANTI_LOOP = state.packsRecommended
+      ? 'Nota: ya se han recomendado packs, no los repitas. Avanza y pide email si no lo tienes.'
+      : 'Puedes recomendar los packs principales una vez y luego avanzar.';
+
+    // Mensajes a OpenAI
     const messages = [
-      { role: 'system', content: SALVA_PROMPT_BASE + '\n' + ANTI_LOOP },
-      // historial breve
-      ...state.history.map(m => ({ role: m.role, content: m.content })),
-      // turno actual del usuario
-      { role: 'user', content: prefix + userText }
+      { role: 'system', content: SALVA_PROMPT + '\n' + ANTI_LOOP },
+      ...state.history.map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: prefix + text }
     ];
 
     const completion = await client.chat.completions.create({
       model: MODEL,
       temperature: 0.7,
-      top_p: 0.95,
+      top_p: 0.9,
       messages
     });
 
-    const reply = completion?.choices?.[0]?.message?.content?.trim?.() || '…';
+    const reply = completion.choices[0].message.content.trim();
 
-    // Actualiza flag si detecta recomendación de packs
-    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium|quebrantahuesos|base\s*por|fuerza\s*espec/i.test(reply)) {
+    // Detecta si recomendó packs
+    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium/i.test(reply)) {
       state.packsRecommended = true;
     }
 
-    // Actualiza memoria (capada)
-    state.history.push({ role: 'user', content: userText });
+    // Guarda historial
+    state.history.push({ role: 'user', content: text });
     state.history.push({ role: 'assistant', content: reply });
     state.history = trimHistory(state.history);
-    if (sessionId) sessions.set(sessionId, state);
+
+    // Si hay correo y no se envió aún, envía resumen
+    if (state.email && !state.summarySent) {
+      state.summarySent = true;
+      sendSummaryEmail(sessionId, state.email, state.history);
+    }
 
     res.json({ reply });
   } catch (err) {
-    console.error('❌ Error /api/chat:', err?.message || err);
-    res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
+    console.error('❌ Error /api/chat:', err.message);
+    res.status(500).json({ error: 'chat_error', detail: err.message });
   }
 });
 
-// ===== Arranque =====
+// ===== Otros endpoints =====
+app.get('/health', (_req, res) => res.send('ok'));
+app.get('/', (_req, res) => res.send('✅ SALVA.COACH funcionando'));
+app.get('/env-check', (_req, res) =>
+  res.json({ ok: true, model: MODEL, adminEmail: ADMIN_EMAIL })
+);
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor activo en puerto ${PORT}`);
