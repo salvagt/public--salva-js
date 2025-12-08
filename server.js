@@ -47,13 +47,17 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   project: process.env.OPENAI_PROJECT
 });
-
-// ===== Crear mailer (Resend primero; SMTP fallback) =====
+// ===== Crear mailer (MailerSend API > Resend API > SMTP fallback) =====
 let transporter = null;
 let resendClient = null;
+const USE_RESEND = !!process.env.RESEND_API_KEY;
+const USE_MAILERSEND = !!process.env.MAILERSEND_API_KEY;
+const FROM_EMAIL = SMTP_USER || ADMIN_EMAIL;
 
-if (USE_RESEND && Resend) {
-  resendClient = new Resend(RESEND_API_KEY);
+if (USE_MAILERSEND) {
+  console.log('📨 Mailer: MailerSend API activo');
+} else if (USE_RESEND && Resend) {
+  resendClient = new Resend(process.env.RESEND_API_KEY);
   console.log('📨 Mailer: Resend API activo');
 } else if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   transporter = nodemailer.createTransport({
@@ -64,7 +68,54 @@ if (USE_RESEND && Resend) {
   });
   console.log('📨 Mailer: SMTP (fallback) configurado');
 } else {
-  console.log('⚠️ Mailer: SIN proveedor activo (ni RESEND_API_KEY ni SMTP_* configurados)');
+  console.log('⚠️ Mailer: SIN proveedor activo (ni MAILERSEND_API_KEY, ni RESEND_API_KEY, ni SMTP_*)');
+}
+
+// Helper genérico de envío: MailerSend → Resend → SMTP
+async function sendMail({ to, subject, html }) {
+  const fromName = FROM_NAME || 'SALVA.COACH';
+  const fromEmail = ADMIN_EMAIL; // “from” recomendado
+
+  // 1) MailerSend API (HTTPS)
+  if (USE_MAILERSEND) {
+    const resp = await fetch('https://api.mailersend.com/v1/email', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.MAILERSEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: { email: fromEmail, name: fromName },
+        to: [{ email: to }],
+        subject,
+        html
+      })
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`MailerSend error: ${resp.status} ${text}`);
+    }
+    const data = await resp.json().catch(() => ({}));
+    return { provider: 'mailersend', id: data?.message_id || data?.id || 'ok' };
+  }
+
+  // 2) Resend API (si existe)
+  if (resendClient) {
+    const from = `${fromName} <${fromEmail}>`;
+    const resp = await resendClient.emails.send({ from, to, subject, html });
+    return { provider: 'resend', id: resp?.id || 'ok' };
+  }
+
+  // 3) SMTP fallback
+  if (transporter) {
+    const info = await transporter.sendMail({
+      from: `"${fromName}" <${FROM_EMAIL}>`,
+      to, subject, html
+    });
+    return { provider: 'smtp', response: info?.response || 'ok' };
+  }
+
+  throw new Error('No email provider configured');
 }
 
 // Helper genérico de envío
