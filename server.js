@@ -1,4 +1,4 @@
-// server.js — CommonJS (Render + tono humano + packs VELOXTREM)
+// server.js — CommonJS (Render + memoria por sesión + tono humano + anti-bucle)
 require('dotenv').config({ override: false });
 const express = require('express');
 const cors = require('cors');
@@ -18,7 +18,7 @@ app.get('/env-check', (_req, res) => {
   res.json({ ok: true, hasOpenAIKey: HAS_KEY, hasOpenAIProject: HAS_PROJECT, model: MODEL });
 });
 
-// ===== Cliente OpenAI (soporta claves sk-proj- gracias a project) =====
+// ===== Cliente OpenAI (clave de proyecto + project ID) =====
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   project: process.env.OPENAI_PROJECT
@@ -28,86 +28,110 @@ const client = new OpenAI({
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 app.get('/', (_req, res) => res.send('✅ SALVA.COACH API activa'));
 
-// ===== Prompt humano del coach (ES/EN) =====
-const SALVA_PROMPT = `
-Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Hablas como una persona real, cercana, clara y profesional. Respondes de forma natural, sin sonar robótico. Usa emojis solo cuando aporten calidez o energía 😊🚴‍♂️💪.
+// ===== Memoria por sesión en RAM =====
+/*
+  sessions: Map<sessionId, {
+    history: {role:'user'|'assistant', content:string}[],
+    packsRecommended: boolean
+  }>
+*/
+const sessions = new Map();
+function getSession(sessionId) {
+  if (!sessionId) return null;
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, { history: [], packsRecommended: false });
+  }
+  return sessions.get(sessionId);
+}
+function trimHistory(arr, max = 12) {
+  if (arr.length > max) return arr.slice(arr.length - max);
+  return arr;
+}
 
-ESTILO Y FLUJO DE CONVERSACIÓN:
-1. **Inicio**: saluda brevemente y pregunta por objetivo, disponibilidad y nivel.  
-2. **Recomendación**: cuando tengas suficiente información, recomienda 1 o 2 packs máximo, priorizando los principales (1 a 1 y Premium).  
-3. **Avance**: una vez recomendado, **no repitas los packs** a menos que el usuario lo pida explícitamente.  
-4. **Modo entrenador**: si el deportista pregunta sobre entrenamientos, nutrición, fuerza, descanso o planificación, responde como entrenador experto.  
-   - Usa lenguaje claro y práctico.  
-   - Da ejemplos y explica el porqué.  
-   - Habla de forma directa, útil y cercana.  
-5. **Cierre o siguiente paso**:
-   - Si el deportista muestra interés, pídele su correo para enviarle más información o propuesta personalizada.  
-   - Propón una llamada breve para conocerlo mejor y afinar su planificación.  
-   - Si ya tiene todo claro, despídete de forma cordial (una frase amable y profesional).  
-   - Si aún tiene dudas, anímalo a preguntarlas.
+// ===== Prompt humano (con política de avances) =====
+const SALVA_PROMPT_BASE = `
+Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Hablas como persona real, cercano/a, claro/a y profesional. Usa emojis solo si aportan calidez 😊🚴‍♂️💪.
 
-PRIORIDAD PACKS (solo si es relevante al contexto):
-1️⃣ Pack 1 a 1 VELOXTREM — 100 €/mes. Coaching individual con seguimiento, contacto directo, análisis de datos y revisiones frecuentes. Perfecto si tiene poco tiempo, busca mejorar rápido o necesita acompañamiento cercano.  
-2️⃣ Pack Premium VELOXTREM — 150 €/mes. Entrenamiento 100% personalizado, fuerza específica, nutrición y análisis continuo. Ideal para quien quiere un rendimiento óptimo con soporte total.  
-(⚠️ Solo ofrece otros packs si el deportista lo menciona o si los principales no encajan).
+ESTILO Y FLUJO:
+1) Saluda breve y pregunta objetivo, disponibilidad y nivel.
+2) Cuando tengas info, recomienda 1–2 packs máximo, priorizando 1 a 1 y Premium. **Hazlo solo una vez** salvo que te lo pidan.
+3) Si ya se han recomendado packs, **no los repitas**; avanza: resuelve dudas, modo entrenador, plan de acción.
+4) Modo entrenador: respuestas prácticas y claras, con ejemplos y porqués.
+5) Cierre / siguiente paso: pide email para enviar propuesta o propone una llamada breve. Despide con cercanía si ya está todo claro.
 
-CONDICIONES:
-- No repitas las mismas recomendaciones en varias respuestas consecutivas.  
-- Si ya se ha hablado de los packs, continúa con la conversación natural.  
-- Si el deportista duda, motívalo y ofrécele ayuda real, no insistencia.  
-- Cuando parezca buen momento, pregunta:  
-  “¿Te gustaría que te llame o me dejes tu correo para enviarte la propuesta personalizada?”  
-- Si acepta, pídele su email y despídete con cercanía.
+CATÁLOGO (usar cuando toque):
+- 🏅 Pack 1 a 1 VELOXTREM — 100 €/mes. Coaching 1:1, ajustes, contacto directo, análisis potencia/FC.
+- 🔥 Premium VELOXTREM — 150 €/mes. 100% personalizado + nutrición + seguimiento y análisis continuo.
+- 🏔 QH 2026 — 399 € (24 semanas).
+- 💪 Base por FC — 8 semanas (89 €) / 12 semanas (99 €).
+- ⚙️ Fuerza específica por vatios — 69 €.
 
-CHECKLIST INTERNO:
-- Objetivo deportivo o reto.
-- Nivel o experiencia.
-- Disponibilidad semanal.
-- Método de entrenamiento (potencia o FC).
-- Problemas o limitaciones.
-- Correo o forma de contacto (al final).
-- Propuesta de llamada.
-
-TU TONO:
-- Cercano, natural, directo.
-- Usa frases cortas, ritmo conversacional.
-- Nunca repitas lo mismo dos veces seguidas.
-- Si el deportista ya ha entendido algo, avanza.
-
-Cuando el deportista pregunte por temas técnicos o de entrenamiento, entra en modo entrenador experto y responde con detalle y seguridad, como lo haría un entrenador profesional con experiencia real.
+POLÍTICA:
+- Prioriza 1 a 1 / Premium si encajan; si no, ofrece 1 alternativa.
+- **No repitas** packs en respuestas consecutivas; continúa la conversación natural.
+- En buen momento pregunta: “¿Te paso propuesta por email o prefieres una llamada breve?”.
+- Recoge email si acepta.
 `;
-// ===== API de chat (bilingüe ES/EN) =====
+
+// ===== API de chat (con memoria y anti-bucle) =====
 app.post('/api/chat', async (req, res) => {
   try {
-    // Entrada
     const userText = (req.body?.message || '').toString().slice(0, 4000);
+    const sessionId = (req.body?.session || '').toString().slice(0, 100);
     if (!userText) return res.json({ reply: '¿En qué te ayudo? 🙂' });
 
-    // Idioma (query ?lang=es|en o autodetección básica)
+    // Idioma
     const langQ = (req.query.lang || '').toString().toLowerCase();
     let lang = langQ.startsWith('en') ? 'en' : (langQ.startsWith('es') ? 'es' : '');
-    if (!lang) {
-      // autodetección mínima
-      lang = /[a-záéíóúñü¿¡]/i.test(userText) ? 'es' : 'en';
-    }
+    if (!lang) lang = /[a-záéíóúñü¿¡]/i.test(userText) ? 'es' : 'en';
     const prefix = lang === 'en' ? 'Answer in English. ' : 'Responde en español. ';
 
-    // Guardas de credenciales
+    // Guardas credenciales
     if (!HAS_KEY) return res.status(500).json({ error: 'missing_api_key', detail: 'Falta OPENAI_API_KEY en Render.' });
     if (!HAS_PROJECT) return res.status(500).json({ error: 'missing_project', detail: 'Falta OPENAI_PROJECT en Render.' });
 
-    // Llamada al modelo
+    // Estado de sesión
+    const state = getSession(sessionId) || { history: [], packsRecommended: false };
+    state.history = trimHistory(state.history);
+
+    // Instrucción dinámica anti-bucle
+    const ANTI_LOOP = state.packsRecommended
+      ? (lang === 'en'
+        ? 'Note: Packs have already been recommended. Do not re-offer them unless explicitly asked. Keep advancing: coach mode, next steps, ask for email or offer a short call.'
+        : 'Nota: ya se han recomendado packs. No los repitas salvo que te lo pidan. Avanza: modo entrenador, siguientes pasos, pide email o propone llamada breve.')
+      : (lang === 'en'
+        ? 'If you recommend packs, do it only once (1–2 options). After that, do not repeat. Keep a natural flow.'
+        : 'Si recomiendas packs, hazlo una vez (1–2 opciones). Después, no repitas. Mantén flujo natural.');
+
+    // Construye mensajes con memoria corta
+    const messages = [
+      { role: 'system', content: SALVA_PROMPT_BASE + '\n' + ANTI_LOOP },
+      // historial breve
+      ...state.history.map(m => ({ role: m.role, content: m.content })),
+      // turno actual del usuario
+      { role: 'user', content: prefix + userText }
+    ];
+
     const completion = await client.chat.completions.create({
-      model: MODEL,               // gpt-4o-mini por defecto (rápido y barato)
-      temperature: 0.7,           // natural y cercano
+      model: MODEL,
+      temperature: 0.7,
       top_p: 0.95,
-      messages: [
-        { role: 'system', content: SALVA_PROMPT },
-        { role: 'user', content: prefix + userText }
-      ]
+      messages
     });
 
     const reply = completion?.choices?.[0]?.message?.content?.trim?.() || '…';
+
+    // Actualiza flag si detecta recomendación de packs
+    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium|quebrantahuesos|base\s*por|fuerza\s*espec/i.test(reply)) {
+      state.packsRecommended = true;
+    }
+
+    // Actualiza memoria (capada)
+    state.history.push({ role: 'user', content: userText });
+    state.history.push({ role: 'assistant', content: reply });
+    state.history = trimHistory(state.history);
+    if (sessionId) sessions.set(sessionId, state);
+
     res.json({ reply });
   } catch (err) {
     console.error('❌ Error /api/chat:', err?.message || err);
