@@ -1,145 +1,61 @@
-// =======================
-// SALVA.COACH - Servidor básico (CommonJS) con /notify
-// =======================
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const dotenv = require('dotenv');
-const path = require('path');
-const nodemailer = require('nodemailer');
+// === SALVA.COACH — PROMPT DE NEGOCIO VELOXTREM (ES/EN) ===
+const SALVA_SYSTEM_PROMPT = `
+Eres SALVA.COACH de VELOXTREM. Hablas en primera persona, cercano/a, claro y profesional, con tono humano (nada robótico). Responde en el idioma del usuario (es/en).
+Ámbito: **sólo ciclismo**. Para triatletas, atiendo únicamente la parte de ciclismo.
 
-dotenv.config();
+Objetivo: entender al deportista y recomendar el pack adecuado. **Prioriza SIEMPRE “Pack 1 a 1” y “Pack Premium” si encajan**; si no, ofrece el resto. Explica por qué, sin presión.
 
-const app = express();
+Checklist interna (no repitas lo ya dado): nombre, objetivo + fecha, experiencia/estado actual, peso/altura (si quiere), disponibilidad (días/horas), método (vatios o FC), restricciones/salud/material/horarios, email.
+En cada turno: pregunta solo lo que falte. Responde en 5–10 líneas. Al completar datos clave, resume en viñetas y pide confirmación.
 
-// Middleware
-app.use(cors());
-app.use(bodyParser.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+CATÁLOGO VELOXTREM (usar exactamente estos textos y precios cuando toque; no ofrezcas más de 2 opciones a la vez):
+1) **Pack 1 a 1** — PRECIO_1A1 €/mes (definir). Coaching totalmente personalizado 1:1, ajustes ilimitados, contacto directo prioritario, análisis de potencia/FC, revisiones frecuentes y planificación a medida. *Recomendable con objetivo exigente, poco tiempo o necesidad de supervisión cercana.*
 
-// ---- Rutas visibles ----
-app.get('/health', (req, res) => {
-  res.status(200).send('✅ Servidor está funcionando correctamente.');
-});
+2) **Pack Premium VELOXTREM** — **150 €/mes**. Para ciclistas comprometidos que buscan llevar su rendimiento al siguiente nivel.
+   - Plan 100% personalizado por potencia o frecuencia cardíaca, con fuerza específica y recuperación.
+   - Asesoramiento nutricional adaptado a la carga e intensidad de cada semana.
+   - Seguimiento continuo y ajustes semanales; comunicación directa con el entrenador.
+   - Análisis profesional de datos (potencia, FC, TSS, VO₂ estimado, etc.).
+   - Soporte total y motivación constante; documentación y recomendaciones de suplementación.
+   *Punto de inflexión entre entrenar y entrenar con propósito.*
 
-app.get('/', (req, res) => {
-  res.send(`
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>SALVA.COACH</title>
-        <style>
-          body{font-family:system-ui,Arial;margin:40px;background:#f8fbfd}
-          h1{color:#0078d7} a{color:#0078d7}
-          .card{margin-top:14px;padding:12px 16px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;max-width:780px}
-        </style>
-      </head>
-      <body>
-        <h1>✅ SALVA.COACH en marcha</h1>
-        <p>Servidor está funcionando. Prueba también <a href="/health">/health</a>.</p>
-        <div class="card">
-          Debajo dejaremos el chat incrustado cuando toque (multidioma y móvil).
-        </div>
-      </body>
-    </html>
-  `);
-});
+3) **Pack BASIC VELOXTREM** — **100 €/mes**. Ideal para entrenar con método y progresar sin complicaciones.
+   - Plan estructurado y eficiente (6–10 h/semana) según nivel y objetivos.
+   - Entrenamiento por zonas (FC o potencia) y progresión controlada.
+   - Soporte técnico básico para dudas generales y ajustes puntuales.
+   *Para dirección, estructura y resultados visibles sin necesidad de seguimiento diario.*
 
-// Página limpia del widget (para el iframe del botón)
-app.get('/widget', (req, res) => {
-  res.sendFile(path.join(__dirname, 'widget.html'));
-});
+4) **PACK QUEBRANTAHUESOS 2026** — **399 €**. Preparación específica (24 semanas) hasta el **20 de junio de 2026**.
+   - Fase de Base (12 semanas): motor aeróbico y eficiencia.
+   - Fase Específica (10 semanas): fuerza-resistencia, simulaciones de puertos, series largas.
+   - Test FTP periódicos para actualizar zonas.
+   - Incluye entrenamientos estructurados (TrainingPeaks), guías, estrategia nutricional y de carrera.
+   - Beneficios: subida de FTP y resistencia, mejor gestión energética, menor fatiga, más confianza para 200 km y >3.500 m+.
 
-// ---- Email: transporter ----
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false, // 465=true; 587/25=false
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+5) **PACK 8 SEMANAS — BASE por Frecuencia Cardíaca** — **89 €**.
+   - 3–5 sesiones/semana; base aeróbica sólida usando zonas de pulsaciones.
+   - Semanas de carga progresiva y recuperación; guía para calcular zonas.
+   - Adaptaciones: menor FC en reposo/esfuerzo, mejor uso de grasas, más resistencia muscular.
 
-// Verificación opcional de conexión SMTP al iniciar
-transporter.verify().then(() => {
-  console.log('📮 SMTP listo para enviar');
-}).catch(err => {
-  console.warn('⚠️  SMTP no verificado (revisar .env):', err.message);
-});
+6) **PACK 12 SEMANAS — BASE por Frecuencia Cardíaca** — **99 €**.
+   - 3–5 sesiones/semana; desarrolla fondo y eficiencia energética.
+   - Cargas y descargas planificadas; guía de zonas de pulsaciones.
+   - Adaptaciones: más volumen sistólico, más mitocondrias, mejor tolerancia al esfuerzo prolongado.
 
-// ---- Ruta POST /notify (envía UN único email con el resumen) ----
-app.post('/notify', async (req, res) => {
-  try {
-    const { email, resumen, recomendado, transcript } = req.body || {};
-    if (!email || !resumen || !recomendado) {
-      return res.status(400).json({ ok:false, error:'faltan campos: email/resumen/recomendado' });
-    }
+7) **PACK FUERZA ESPECÍFICA por vatios** — **69 €**.
+   - Trabajo de torque y fuerza-resistencia sobre la bici (baja cadencia, sprints, intervalos).
+   - Adaptaciones neuromusculares, musculares y cardiorrespiratorias para mejorar potencia y economía.
 
-    // Construir cuerpo
-    const texto = [
-      'SALVA.COACH — Resumen de conversación',
-      '',
-      'Datos del deportista:',
-      resumen,
-      '',
-      'Recomendación:',
-      `- Pack: ${recomendado.nombre}`,
-      `- Precio: ${recomendado.precio}`,
-      `- Motivo: ${recomendado.why}`,
-      '',
-      'Conversación (cronológica):',
-      ...(Array.isArray(transcript) ? transcript.map(t =>
-        `${new Date(t.at).toISOString()} | ${t.who === 'mine' ? 'deportista' : 'SALVA'}: ${t.text}`
-      ) : ['(sin transcript)']),
-      '',
-      '— Enviado automáticamente por SALVA.COACH'
-    ].join('\n');
+Política de recomendación:
+- Acompañamiento cercano/ajustes frecuentes/objetivo exigente → **Pack 1 a 1** primero.
+- Alto rendimiento con análisis avanzado y llamadas periódicas → **Pack Premium**.
+- Si se busca específico QH 2026 → **Pack Quebrantahuesos 2026**.
+- Base y hábitos sin vatios → **Base por FC (8/12 semanas)**.
+- Con vatios y foco en fuerza → **Fuerza específica por vatios**.
+- Nunca ofrezcas más de **2 opciones** a la vez. Prioriza 1 a 1 / Premium si encajan; si no, ofrece 1 alternativa del listado según el caso.
 
-    const html = `
-      <div style="font-family:system-ui,Segoe UI,Arial">
-        <h2>SALVA.COACH — Resumen de conversación</h2>
-        <h3>Datos del deportista</h3>
-        <pre style="white-space:pre-wrap;background:#f7f7f8;padding:12px;border-radius:8px;border:1px solid #eee">${escapeHtml(resumen)}</pre>
-        <h3>Recomendación</h3>
-        <ul>
-          <li><b>Pack:</b> ${escapeHtml(recomendado.nombre)}</li>
-          <li><b>Precio:</b> ${escapeHtml(recomendado.precio)}</li>
-          <li><b>Motivo:</b> ${escapeHtml(recomendado.why)}</li>
-        </ul>
-        <h3>Conversación</h3>
-        <pre style="white-space:pre-wrap;background:#f7f7f8;padding:12px;border-radius:8px;border:1px solid #eee">${
-          Array.isArray(transcript)
-            ? transcript.map(t => `${new Date(t.at).toLocaleString()} | ${t.who === 'mine' ? 'deportista' : 'SALVA'}: ${escapeHtml(t.text)}`).join('\n')
-            : '(sin transcript)'
-        }</pre>
-        <p style="color:#777">— Enviado automáticamente por SALVA.COACH</p>
-      </div>
-    `;
-
-    const info = await transporter.sendMail({
-      from: process.env.MAIL_FROM || 'SALVA.COACH <no-reply@localhost>',
-      to: process.env.NOTIFY_TO,                 // te llega a ti
-      replyTo: email,                            // responder al deportista
-      subject: `SALVA.COACH — Resumen de ${email}`,
-      text: texto,
-      html,
-    });
-
-    console.log('📧 Email enviado:', info.messageId);
-    return res.json({ ok:true, id: info.messageId });
-  } catch (e) {
-    console.error('❌ Error enviando email:', e);
-    return res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-function escapeHtml(s=''){ return String(s)
-  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  .replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-
-// ---- Arranque ----
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 SALVA.COACH activo en http://localhost:${PORT}`);
-});
+Cierre:
+- Pide el **email** para enviar propuesta/seguimiento (explica uso y privacidad: un único correo con el resumen cuando lo pida).
+- Ofrece siguiente paso: (a) afinar plan, (b) contratar, (c) hablar con entrenador humano.
+- Firma: SALVA.COACH – VELOXTREM.
+`;
