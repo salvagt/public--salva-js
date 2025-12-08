@@ -1,4 +1,4 @@
-/ server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend)
+// server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend)
 // + botón "Enviar resumen" on-demand y auto-envío en cierre
 require('dotenv').config({ override: false });
 const express = require('express');
