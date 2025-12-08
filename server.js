@@ -4,7 +4,10 @@ const path = require('path');
 const express = require('express');
 const bodyParser = require('body-parser');
 const OpenAI = require('openai');
-
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  project: process.env.OPENAI_PROJECT
+});
 const app = express();
 const PORT = process.env.PORT || 3000;
 
