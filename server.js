@@ -262,7 +262,54 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
   }
 });
+// ===== Test rápido de correo =====
+// Verifica el transporte al arrancar (opcional, pero útil)
+if (transporter && transporter.verify) {
+  transporter.verify().then(() => {
+    console.log('📨 SMTP listo para enviar');
+  }).catch(err => {
+    console.error('❌ SMTP verify error:', err?.message || err);
+  });
+}
 
+// GET /email-test?to=correo@dominio.com&user=1
+// - Si añades &user=1 también envía al deportista, simulando el correo de cortesía.
+app.get('/email-test', async (req, res) => {
+  try {
+    const to = (req.query.to || '').toString().trim();
+    if (!to) return res.status(400).json({ ok: false, error: 'Falta ?to=correo@dominio' });
+
+    // Mensaje simple al staff (ADMIN_EMAIL)
+    const staffInfo = await transporter.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to: ADMIN_EMAIL,
+      subject: 'Test SALVA.COACH (staff)',
+      html: `<p>Funciona el envío al staff ✅</p><p>Destino staff: ${ADMIN_EMAIL}</p>`
+    });
+
+    let userInfo = null;
+    if (String(req.query.user || '') === '1') {
+      userInfo = await transporter.sendMail({
+        from: `"${FROM_NAME}" <${SMTP_USER}>`,
+        to,
+        subject: 'Test SALVA.COACH (usuario)',
+        html: `<p>Hola 👋 Este es un test de correo de cortesía para el deportista.</p><p>Destino usuario: ${to}</p>`
+      });
+    }
+
+    console.log('📨 Test staff response:', staffInfo?.response);
+    if (userInfo) console.log('📨 Test user response:', userInfo?.response);
+
+    res.json({
+      ok: true,
+      staff: { envelope: staffInfo?.envelope, response: staffInfo?.response },
+      user: userInfo ? { envelope: userInfo?.envelope, response: userInfo?.response } : null
+    });
+  } catch (err) {
+    console.error('❌ /email-test error:', err?.message || err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
 // ===== Arranque =====
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
