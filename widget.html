@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SALVA.COACH – Chat</title>
+  <style>
+    :root{
+      --bg:#0d1117; --panel:#111b21; --mine:#176b5b; --theirs:#1f2c34;
+      --text:#eaeef2; --muted:#9aaab4; --accent:#25d366; --link:#6bbcff;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial}
+    .wrap{display:flex;flex-direction:column;height:100%}
+    .hdr{padding:10px 12px;background:var(--panel);border-bottom:1px solid #1c2a31;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:5}
+    .title{font-weight:700}
+    .sub{font-size:12px;color:var(--muted)}
+    .spacer{flex:1}
+    .btn{font-size:12px;padding:7px 12px;border-radius:14px;border:1px solid #2a3b44;background:#0e1a20;color:#cfe6d8;cursor:pointer}
+    .ok{color:#9be7c4}
+    .msgs{flex:1;overflow:auto;padding:14px}
+    .row{display:flex;margin:6px 0}
+    .msg{max-width:78%;padding:10px 12px;border-radius:10px;font-size:15px;line-height:1.35;white-space:pre-wrap}
+    .mine{margin-left:auto;background:var(--mine)}
+    .theirs{margin-right:auto;background:var(--theirs)}
+    .time{display:block;margin-top:6px;font-size:11px;color:#cfd4d6;opacity:.8}
+    .input{display:flex;gap:8px;padding:10px;background:var(--panel);border-top:1px solid #1c2a31;position:sticky;bottom:0}
+    .input input{flex:1;padding:12px 14px;border-radius:20px;border:1px solid #22333b;background:#0e1a20;color:var(--text);outline:none}
+    .input button{padding:10px 14px;border-radius:20px;border:none;background:var(--accent);color:#083b24;font-weight:700;cursor:pointer}
+    .typing{display:inline-block;min-width:34px}
+    .dot{display:inline-block;width:6px;height:6px;margin:0 2px;background:#cfe6d8;border-radius:50%;opacity:.3;animation:blink 1.4s infinite}
+    .dot:nth-child(2){animation-delay:.2s} .dot:nth-child(3){animation-delay:.4s}
+    @keyframes blink{50%{opacity:1}}
+    a{color:var(--link)}
+    @media (max-width:600px){ .msg{max-width:88%} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hdr">
+      <div>
+        <div class="title">SALVA.COACH</div>
+        <div class="sub">Entrenador personal · VELOXTREM</div>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn" id="btn-llamada">Agendar llamada</button>
+      <button class="btn" id="btn-resumen">Enviar resumen</button>
+      <span class="btn ok" id="status">listo</span>
+    </div>
+
+    <div id="chat" class="msgs"></div>
+
+    <div class="input">
+      <input id="txt" type="text" placeholder="Escribe tu mensaje…" autocomplete="off" />
+      <button id="send">Enviar</button>
+    </div>
+  </div>
+
+  <script>
+  // ======== configuración rápida
+  // URL para llamadas (pon tu Calendly/WhatsApp/teléfono)
+  const CALL_URL = "https://CALENDLY_O_WHATSAPP_AQUI";  // <-- cámbialo
+  const ENTRENADOR = "Salva";                            // nombre para tono cercano
+
+  // Packs VELOXTREM — actualiza cuando me pases la info exacta de todos
+  const PACKS = {
+    "1 a 1":   { nombre:"Pack 1 a 1", precio:"PRECIO_1A1/mes", breve:"coaching 1:1 con ajustes ilimitados y seguimiento muy cercano", ideal:"objetivo exigente, poco tiempo o dudas frecuentes" },
+    "premium": { nombre:"Pack Premium", precio:"150 €/mes",     breve:"plan adaptativo con análisis avanzado y soporte prioritario",      ideal:"alto rendimiento sin 1:1 diario" },
+    "qh":      { nombre:"PACK QUEBRANTAHUESOS 2026", precio:"399 €", breve:"preparación completa y específica para QH 2026",             ideal:"objetivo principal QH" },
+    "base12":  { nombre:"PACK 12 SEMANAS BASE por FC", precio:"99 €",  breve:"12 semanas construyendo fondo por frecuencia cardiaca",     ideal:"asentar hábitos y base sin vatios" },
+    "base8fc": { nombre:"PACK 8 SEMANAS BASE por FC", precio:"89 €",   breve:"8 semanas de base por FC para retomar suave",               ideal:"vuelves de parón o prefieres FC" },
+    "base8w":  { nombre:"PACK INICIA BASE 8 SEMANAS por vatios", precio:"89 €", breve:"entrada con potencia (vatios) y test inicial",   ideal:"empiezas a trabajar por vatios" },
+    "fuerza":  { nombre:"PACK FUERZA ESPECÍFICA por vatios", precio:"69 €", breve:"trabajo específico para ganar torque/FTP",            ideal:"mejorar fuerza en bici" }
+  };
+
+  // ======== utilidades UI
+  const chat = document.getElementById('chat');
+  const txt  = document.getElementById('txt');
+  const send = document.getElementById('send');
+  const status = document.getElementById('status');
+  const btnResumen = document.getElementById('btn-resumen');
+  const btnLlamada = document.getElementById('btn-llamada');
+  const now = () => new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+  const history = [];
+  function push(text, who='theirs'){
+    const row = document.createElement('div'); row.className='row';
+    const msg = document.createElement('div'); msg.className = `msg ${who==='mine'?'mine':'theirs'}`;
+    msg.textContent = text;
+    const t = document.createElement('span'); t.className='time'; t.textContent = now();
+    msg.appendChild(t); row.appendChild(msg); chat.appendChild(row); chat.scrollTop = chat.scrollHeight;
+    history.push({at: Date.now(), who, text});
+  }
+  function typing(on=true){
+    if(on){
+      const row = document.createElement('div'); row.className='row'; row.id='__typing';
+      const msg = document.createElement('div'); msg.className='msg theirs';
+      const holder = document.createElement('span'); holder.className='typing';
+      holder.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+      msg.appendChild(holder); row.appendChild(msg); chat.appendChild(row); chat.scrollTop = chat.scrollHeight;
+    }else{
+      const n = document.getElementById('__typing'); if(n) n.remove();
+    }
+  }
+  function say(text, delay=700){
+    typing(true);
+    setTimeout(()=>{ typing(false); push(text,'theirs'); }, delay);
+  }
+
+  // ======== respuestas humanas / small-talk
+  function esSmallTalk(s){
+    const x = s.toLowerCase();
+    return /(hola|buenas|qué tal|que tal|cómo estás|como estas|buenos días|buenas tardes|buenas noches|gracias|muchas gracias)/i.test(x);
+  }
+  function responderSmallTalk(s){
+    const x = s.toLowerCase();
+    if(/(qué tal|que tal|cómo estás|como estas)/.test(x)){
+      say(`¡Gracias por preguntar! Estoy bien, con ganas de ayudarte 😊 Cuéntame, ¿en qué te gustaría que trabajemos?`);
+      return true;
+    }
+    if(/hola|buenas|buenos días|buenas tardes|buenas noches/.test(x)){
+      say(`¡Hola! Soy ${ENTRENADOR}. Encantado de tenerte por aquí. ¿En qué puedo ayudarte hoy?`);
+      return true;
+    }
+    if(/gracias/.test(x)){ say(`¡A ti! 😊 Si te queda alguna duda, dime sin problema.`); return true; }
+    return false;
+  }
+
+  // ======== entrevista suave
+  const datos = { nombre:'', objetivo:'', fecha:'', metodo:'', lesiones:'', fuerza:'', disponibilidad:'', email:'' };
+  const steps = [
+    {k:'nombre', q:'¿Cómo te llamas?'},
+    {k:'objetivo', q:'¿Qué objetivo tienes y para cuándo? (si hay fecha)'},
+    {k:'metodo', q:'¿Entrenas por vatios o por frecuencia cardiaca?'},
+    {k:'lesiones', q:'¿Alguna lesión o molestia reciente que deba saber?'},
+    {k:'fuerza', q:'¿Puedes hacer fuerza en casa o prefieres gimnasio?'},
+    {k:'disponibilidad', q:'¿Cuántos días/horas a la semana puedes entrenar?'},
+    {k:'email', q:'Para enviarte la propuesta y plan de inicio, ¿tu email? (solo te mandaré un correo)'}
+  ];
+  function pendiente(){ return steps.find(p => !String(datos[p.k]||'').trim()); }
+  function guardar(text){
+    const p = pendiente(); if(!p) return;
+    const v = text.trim(); if(!v) return;
+    datos[p.k] = v;
+    if(p.k==='objetivo'){
+      const m = v.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2}|[a-zA-Z]+ \d{4})/);
+      if(m) datos.fecha = m[0];
+    }
+    if(p.k==='metodo'){
+      const low = v.toLowerCase();
+      datos.metodo = low.includes('vat') ? 'vatios' : (low.includes('fc')||low.includes('cardi')?'fc':'no especifica');
+    }
+  }
+
+  // ======== packs: detección cuando preguntan por uno
+  function detectarPackPregunta(text){
+    const t = text.toLowerCase();
+    if(t.includes('1 a 1') || t.includes('1a1') || t.includes('uno a uno')) return PACKS["1 a 1"];
+    if(t.includes('premium')) return PACKS["premium"];
+    if(t.includes('quebrantahuesos') || t.includes('qh')) return PACKS["qh"];
+    if(/12.*base.*fc|base.*12/i.test(t)) return PACKS["base12"];
+    if(/8.*base.*fc|base.*8.*fc/i.test(t)) return PACKS["base8fc"];
+    if(/8.*vatios|base.*8.*vatios/i.test(t)) return PACKS["base8w"];
+    if(/fuerza/i.test(t)) return PACKS["fuerza"];
+    return null;
+  }
+  function responderSobrePack(pk){
+    say(`Te cuento como lo explico siempre, cercano y claro:\n\n👉 ${pk.nombre} — ${pk.precio}\n${pk.breve}.\n\nSuele encajar cuando: ${pk.ideal}.\n\nSi te interesa, seguimos afinando con dos datos: disponibilidad y si entrenas por vatios o por FC. ¿Te parece?`, 900);
+  }
+
+  function recomendar(){
+    const d = datos;
+    if (/qh|quebrantahuesos/i.test(d.objetivo)) return PACKS.qh;
+    if (/lesi|tendi|oper|dolor/i.test(d.lesiones)) return PACKS["1 a 1"];
+    if (/vatios|potenc/i.test(d.metodo)) return PACKS.base8w;
+    if (/fc|cardi/i.test(d.metodo)) return PACKS.base12;
+    return PACKS.premium;
+  }
+  function resumenTexto(){
+    return [
+      `Nombre: ${datos.nombre}`,
+      `Objetivo/fecha: ${datos.objetivo}${datos.fecha?` (${datos.fecha})`:''}`,
+      `Método: ${datos.metodo||'no especifica'}`,
+      `Lesiones: ${datos.lesiones||'ninguna'}`,
+      `Fuerza: ${datos.fuerza||'no especifica'}`,
+      `Disponibilidad: ${datos.disponibilidad||'no especifica'}`,
+      `Email: ${datos.email||''}`
+    ].join('\n');
+  }
+
+  function posibleCierre(){
+    if(!pendiente()){
+      const rec = recomendar();
+      say(
+`Con lo que me has contado, te encaja:
+👉 ${rec.nombre} — ${rec.precio}
+Motivo: ${rec.breve}.
+
+Si te parece, pulsa “Enviar resumen” (arriba). Me llega todo al correo y te mando propuesta de inicio a ${datos.email}.  
+Si prefieres, podemos **agendar una llamada** para conocerte mejor.`,
+      900);
+    }
+  }
+
+  // ======== flujo principal
+  function bienvenida(){
+    say(`¡Hola! Soy ${ENTRENADOR}. ¿En qué puedo ayudarte hoy? 🙂`, 650);
+  }
+
+  function procesarEntrada(user){
+    const txtL = user.toLowerCase();
+
+    // 1) small talk humano
+    if (esSmallTalk(txtL)) { responderSmallTalk(txtL); return; }
+
+    // 2) si preguntan por un pack concreto
+    const pck = detectarPackPregunta(txtL);
+    if (pck){ responderSobrePack(pck); return; }
+
+    // 3) entrevista suave
+    guardar(user);
+    const p = pendiente();
+    if (p){ say(p.q, 700 + Math.floor(Math.random()*400)); }
+    else { posibleCierre(); }
+  }
+
+  // ======== UI eventos
+  function pushMine(){
+    const v = txt.value.trim(); if(!v) return;
+    push(v, 'mine'); txt.value='';
+    setTimeout(()=>procesarEntrada(v), 300);
+  }
+  send.onclick = pushMine;
+  txt.addEventListener('keydown', e => { if (e.key==='Enter') pushMine(); });
+
+  // ======== acciones de cabecera
+  btnLlamada.onclick = ()=> {
+    if (!CALL_URL || CALL_URL.includes('CALENDLY_O_WHATSAPP_AQUI')){
+      say('Aún no tengo configurada la URL de llamadas. Avísame y lo activamos enseguida 😊', 500);
+      return;
+    }
+    window.open(CALL_URL, '_blank');
+  };
+
+  btnResumen.onclick = async()=>{
+    status.textContent = 'enviando…'; status.classList.remove('ok');
+    try{
+      const payload = {
+        email: datos.email || '(sin email)',
+        resumen: resumenTexto(),
+        recomendado: recomendar(),
+        transcript: history
+      };
+      const r = await fetch('/notify', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      status.textContent = 'resumen enviado ✅'; status.classList.add('ok');
+      say('¡Perfecto! He enviado el resumen. Te escribo por email con la propuesta y, si quieres, agendamos llamada para ajustar detalles 🙌', 700);
+    }catch(e){
+      status.textContent = 'falló el envío';
+      say('No pude enviar el email ahora mismo. Puedo reintentarlo o, si lo prefieres, agendamos llamada para no perder el hilo.', 700);
+      console.error(e);
+    }
+  };
+
+  // inicio
+  bienvenida();
+  </script>
+</body>
+</html>

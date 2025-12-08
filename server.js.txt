@@ -1,0 +1,20 @@
+// server.js — servidor básico para SALVA.COACH
+import express from "express";
+import dotenv from "dotenv";
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Ruta de prueba de salud
+app.get("/health", (req, res) => {
+  res.send("✅ SALVA.COACH en marcha");
+});
+
+// Servir archivos estáticos (por ejemplo, index.html si lo tienes)
+app.use(express.static("./public"));
+
+// Arranque del servidor
+app.listen(PORT, () => {
+  console.log(`Servidor activo en http://localhost:${PORT}`);
+});
