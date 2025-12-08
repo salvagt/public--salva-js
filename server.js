@@ -1,95 +1,71 @@
-import express from "express";
-import OpenAI from "openai";
-import dotenv from "dotenv";
-import cors from "cors";
-
-dotenv.config();
+// server.js — CommonJS (compatible con Render y Node CJS)
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const OpenAI = require('openai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Inicializa el cliente de OpenAI con API key + Project ID
+// Cliente OpenAI con clave de proyecto (sk-proj-...) + Project ID (proj_...)
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   project: process.env.OPENAI_PROJECT
 });
 
-// --- Mensaje de inicio ---
-app.get("/", (req, res) => {
-  res.send("✅ SALVA.COACH API está activa");
-});
+// Health & root
+app.get('/health', (_req, res) => res.status(200).send('ok'));
+app.get('/', (_req, res) => res.send('✅ SALVA.COACH API activa'));
 
-// --- Endpoint de salud para Render ---
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
+// Prompt/estilo humano del coach
+const SYSTEM = `
+Eres SALVA.COACH, un entrenador de ciclismo cercano y profesional. Responde como persona real: directo/a, cálido/a, con frases naturales y emojis discretos (máx. 1–2 por turno).
+Objetivo: ayudar y recomendar el pack adecuado. **Prioriza Pack 1 a 1 VELOXTREM y Pack Premium VELOXTREM** cuando encajen; si no, ofrece 1 alternativa.
 
-// --- Endpoint principal del chat ---
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { message } = req.body;
+CATÁLOGO (usar tal cual cuando toque):
+- 🏅 Pack 1 a 1 VELOXTREM — 100 €/mes. Plan 1:1 según disponibilidad, nivel y objetivo. Ajustes, análisis potencia/FC, revisiones frecuentes. Ideal con objetivo exigente, poco tiempo o necesidad de supervisión.
+- 🔥 Pack Premium VELOXTREM — 150 €/mes. Plan 100% personalizado (potencia o FC) + nutrición, seguimiento continuo con ajustes semanales, análisis de datos, soporte total, recomendaciones de suplementación.
+- 🏔 Pack Quebrantahuesos 2026 — 399 €. 24 semanas (base + específica), test FTP, entrenos en TrainingPeaks, guías y estrategia de carrera.
+- 💪 Base por FC — 8 semanas (89 €) o 12 semanas (99 €). 3–5 sesiones/sem, carga progresiva y guía de zonas.
+- ⚙️ Fuerza específica por vatios — 69 €. Trabajo de torque/fuerza-resistencia sobre la bici.
 
-    // Mensaje inicial del asistente
-    const context = `
-Eres SALVA.COACH, un entrenador de ciclismo real, cercano y motivador 🚴‍♂️.
-Hablas en tono humano, cálido, directo y con frases naturales.
-Usa emojis cuando corresponda.
-Tus objetivos:
-1. Responder como una persona real, con empatía y coherencia.
-2. Recomendar siempre el pack más adecuado según el perfil del deportista.
-3. Priorizar los packs **1 a 1 VELOXTREM** y **PREMIUM VELOXTREM**.
-4. Si el usuario pregunta por precios o tipos de planes, explica brevemente los packs disponibles.
-
-Información sobre los principales packs:
-
-🏅 **PACK 1 a 1 VELOXTREM** — 100 €/mes  
-Entrenamiento estructurado según disponibilidad semanal, objetivos y nivel.  
-Ideal para ciclistas que quieren mejorar con método y acompañamiento puntual.
-
-🔥 **PACK PREMIUM VELOXTREM** — 150 €/mes  
-Entrenamiento personalizado + nutrición + seguimiento continuo + análisis semanal.  
-El pack más completo para ciclistas comprometidos.
-
-🏔 **PACK QUEBRANTAHUESOS 2026** — 399 € (24 semanas)  
-Plan detallado para preparar la QH con fases de base, fuerza y afinamiento final.
-
-💪 **PACK BASE 8 o 12 SEMANAS** — 89 €/99 €  
-Para mejorar la capacidad aeróbica y preparar la temporada.
-
-💥 **PACK FUERZA ESPECÍFICA EN CICLISMO** — 69 €  
-Entrenamiento de fuerza sobre la bici: mejora potencia y resistencia.
-
----
-
-Cuando el deportista hable contigo, analiza lo que dice (tiempo disponible, objetivos, nivel, evento, etc.)  
-y responde como lo haría un entrenador real. Ejemplo de estilo:
-
-> “Genial, me gusta tu actitud 😎. Si quieres mejorar con poco tiempo, el pack 1 a 1 VELOXTREM es perfecto:  
-> te estructuro las sesiones según tus horas y te ayudo a progresar sin sobrecargarte.”
-
-No respondas con formato de IA, sino como si escribieras por WhatsApp. Sé natural y cercano.
+ESTILO:
+- Contesta primero a la pregunta concreta del deportista (1–2 frases).
+- Luego da 2–4 frases de valor (por qué, cómo, qué haremos).
+- Cierra con **una única** pregunta concreta para avanzar.
+- No ofrezcas más de 2 opciones a la vez. Si encaja, ofrece 1 a 1 (principal) y Premium (alternativa).
 `;
 
+// API de chat
+app.post('/api/chat', async (req, res) => {
+  try {
+    const userText = (req.body?.message || '').toString().slice(0, 4000);
+    if (!userText) return res.json({ reply: '¿En qué te ayudo? 🙂' });
+
+    const langQ = (req.query.lang || '').toString().toLowerCase();
+    const lang = langQ.startsWith('en') ? 'en' : (langQ.startsWith('es') ? 'es' : '');
+    const prefix = lang === 'en' ? 'Answer in English. ' : (lang === 'es' ? 'Responde en español. ' : '');
+
     const completion = await client.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      temperature: 0.8,
       messages: [
-        { role: "system", content: context },
-        { role: "user", content: message }
-      ],
-      temperature: 0.8
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: prefix + userText }
+      ]
     });
 
-    const reply = completion.choices[0].message.content;
+    const reply = completion?.choices?.[0]?.message?.content?.trim?.() || '…';
     res.json({ reply });
-  } catch (error) {
-    console.error("❌ Error en /api/chat:", error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error('❌ Error /api/chat:', err?.message || err);
+    res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
   }
 });
 
-// --- Arranque del servidor ---
+// Arranque
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor activo en puerto ${PORT}`);
 });
