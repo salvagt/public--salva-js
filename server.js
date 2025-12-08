@@ -160,7 +160,7 @@ REGLAS:
 
 // ===== Utilidades =====
 function detectEmail(text) {
-  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);
+  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return m ? m[0] : null;
 }
 
@@ -174,7 +174,7 @@ function renderHistoryText(history, maxLines = 10) {
   const last = history.slice(-maxLines);
   return last
     .map(h => `${h.role === 'user' ? 'Deportista' : 'SALVA'}: ${h.content}`)
-    .join('\\n');
+    .join('\n');
 }
 
 // ===== Emails específicos (usan sendMail genérico) =====
@@ -298,7 +298,7 @@ app.post('/api/chat', async (req, res) => {
     const emailFound = detectEmail(text);
     if (emailFound && !state.email) {
       state.email = emailFound;
-      // No enviamos automáticamente: sólo cuando el usuario pulse el botón
+      // No enviamos automáticamente hasta cierre
       state.summarySent = false;
     }
 
@@ -328,7 +328,7 @@ app.post('/api/chat', async (req, res) => {
     let reply = (completion.choices?.[0]?.message?.content || '').trim();
 
     // Marcar recomendación de packs si procede
-    if (/pack\\s*(1\\s*a\\s*1|uno\\s*a\\s*uno)|premium|quebrantahuesos|base\\s*por|fuerza\\s*espec/i.test(reply)) {
+    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium|quebrantahuesos|base\s*por|fuerza\s*espec/i.test(reply)) {
       state.packsRecommended = true;
     }
 
@@ -353,7 +353,28 @@ app.post('/api/chat', async (req, res) => {
     state.history.push({ role: 'assistant', content: reply });
     state.history = trimHistory(state.history);
 
-    // NO envío automático aquí (queda a botón /api/send-summary)
+    // === AUTO-ENVÍO AL DETECTAR CIERRE (insertado) ===
+    const closing = /(gracias|perfecto|genial|ok|de acuerdo|hablamos|listo|vale|hasta luego|buenas noches|nos vemos)\b/i.test(text);
+    if (state.email && !state.summarySent && state.packsRecommended && closing) {
+      try {
+        await sendAdminSummary({ sessionId, emailUser: state.email, history: state.history });
+        await sendUserReceipt({ emailUser: state.email, history: state.history, lang });
+        state.summarySent = true;
+
+        // Añade aviso al último reply enviado
+        const notice = (lang === 'en')
+          ? `\n\n✅ I’ve emailed you the summary and forwarded it to the coach.`
+          : `\n\n✅ Te acabo de enviar el resumen por email y lo he remitido al entrenador.`;
+        const lastIdx = state.history.length - 1;
+        state.history[lastIdx].content += notice;
+        // Devuelve el reply con el aviso ya incluido
+        reply += notice;
+      } catch (e) {
+        console.error('❌ auto-send summary error:', e?.message || e);
+      }
+    }
+    // === FIN AUTO-ENVÍO ===
+
     return res.json({ reply });
   } catch (err) {
     console.error('❌ Error /api/chat:', err?.message || err);
