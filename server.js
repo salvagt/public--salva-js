@@ -1,9 +1,13 @@
-// server.js — SALVA.COACH con memoria + anti-bucle + emails (staff y deportista)
+// server.js — SALVA.COACH con memoria + anti-bucle + emails (Resend API o SMTP como fallback)
 require('dotenv').config({ override: false });
 const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const OpenAI = require('openai');
+
+// === Resend (API HTTPS, recomendado) ===
+let Resend = null;
+try { Resend = require('resend').Resend; } catch (_) { /* no instalado aún */ }
 
 const app = express();
 app.use(cors());
@@ -14,21 +18,28 @@ const HAS_KEY = !!process.env.OPENAI_API_KEY;
 const HAS_PROJECT = !!process.env.OPENAI_PROJECT;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
+// SMTP (fallback)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 
+// Resend (preferido)
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const USE_RESEND = !!RESEND_API_KEY;
+
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'salva@veloxtrem.com';
 const FROM_NAME = process.env.FROM_NAME || 'SALVA.COACH';
 const BOOKING_URL = process.env.BOOKING_URL || ''; // opcional
+const FROM_EMAIL = SMTP_USER || ADMIN_EMAIL; // from por defecto
 
 console.log('ENV CHECK =>', {
   HAS_KEY,
   HAS_PROJECT,
   MODEL,
   ADMIN_EMAIL,
-  HAS_SMTP: !!(SMTP_HOST && SMTP_USER && SMTP_PASS)
+  HAS_SMTP: !!(SMTP_HOST && SMTP_USER && SMTP_PASS),
+  hasResend: !!RESEND_API_KEY
 });
 
 // ===== OpenAI client =====
@@ -37,13 +48,41 @@ const client = new OpenAI({
   project: process.env.OPENAI_PROJECT
 });
 
-// ===== Nodemailer transporter =====
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_PORT === 465, // true para 465
-  auth: { user: SMTP_USER, pass: SMTP_PASS }
-});
+// ===== Crear mailer (Resend primero; SMTP fallback) =====
+let transporter = null;
+let resendClient = null;
+
+if (USE_RESEND && Resend) {
+  resendClient = new Resend(RESEND_API_KEY);
+  console.log('📨 Mailer: Resend API activo');
+} else if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // 465 SSL; 587 STARTTLS negociado
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+  console.log('📨 Mailer: SMTP (fallback) configurado');
+} else {
+  console.log('⚠️ Mailer: SIN proveedor activo (ni RESEND_API_KEY ni SMTP_* configurados)');
+}
+
+// Helper genérico de envío
+async function sendMail({ to, subject, html }) {
+  if (resendClient) {
+    // Resend HTTPS
+    const from = `${FROM_NAME} <${ADMIN_EMAIL}>`;
+    const resp = await resendClient.emails.send({ from, to, subject, html });
+    return { provider: 'resend', id: resp?.id };
+  }
+  if (transporter) {
+    // SMTP fallback
+    const from = `"${FROM_NAME}" <${FROM_EMAIL}>`;
+    const info = await transporter.sendMail({ from, to, subject, html });
+    return { provider: 'smtp', response: info?.response };
+  }
+  throw new Error('No email provider configured');
+}
 
 // ===== Endpoints de diagnóstico =====
 app.get('/health', (_req, res) => res.status(200).send('ok'));
@@ -53,6 +92,7 @@ app.get('/env-check', (_req, res) => {
     hasOpenAIKey: HAS_KEY,
     hasOpenAIProject: HAS_PROJECT,
     hasSMTP: !!(SMTP_HOST && SMTP_USER && SMTP_PASS),
+    hasResend: !!RESEND_API_KEY,
     model: MODEL,
     adminEmail: ADMIN_EMAIL
   });
@@ -125,9 +165,8 @@ function renderHistoryText(history, maxLines = 10) {
     .join('\n');
 }
 
-// ===== Emails =====
+// ===== Emails específicos (usan sendMail genérico) =====
 async function sendAdminSummary({ sessionId, emailUser, history }) {
-  if (!transporter) return;
   const html = `
     <h2>Nuevo contacto desde SALVA.COACH</h2>
     <p><b>Sesión:</b> ${sessionId}</p>
@@ -137,8 +176,7 @@ async function sendAdminSummary({ sessionId, emailUser, history }) {
     <hr/>
     <p><i>Resumen automático – VELOXTREM</i></p>
   `;
-  await transporter.sendMail({
-    from: `"${FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: ADMIN_EMAIL,
     subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || 'sin correo'})`,
     html
@@ -146,7 +184,7 @@ async function sendAdminSummary({ sessionId, emailUser, history }) {
 }
 
 async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
-  if (!transporter || !emailUser) return;
+  if (!emailUser) return;
   const intro =
     lang === 'en'
       ? `Thanks for contacting SALVA.COACH! Here's a summary of our conversation. I’ll get back to you shortly.`
@@ -175,8 +213,7 @@ async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
     <p>${privacy}</p>
     <p>— ${FROM_NAME} · VELOXTREM</p>
   `;
-  await transporter.sendMail({
-    from: `"${FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: emailUser,
     subject: (lang === 'en'
       ? 'Your SALVA.COACH summary'
@@ -249,7 +286,7 @@ app.post('/api/chat', async (req, res) => {
     state.history = trimHistory(state.history);
 
     // Envío de emails (una sola vez por sesión, cuando haya email)
-    if (state.email && !state.summarySent && transporter) {
+    if (state.email && !state.summarySent) {
       state.summarySent = true;
       // Enviar al staff y al deportista (no bloquear respuesta)
       sendAdminSummary({ sessionId, emailUser: state.email, history: state.history }).catch(()=>{});
@@ -262,8 +299,8 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
   }
 });
+
 // ===== Test rápido de correo =====
-// Verifica el transporte al arrancar (opcional, pero útil)
 if (transporter && transporter.verify) {
   transporter.verify().then(() => {
     console.log('📨 SMTP listo para enviar');
@@ -272,16 +309,13 @@ if (transporter && transporter.verify) {
   });
 }
 
-// GET /email-test?to=correo@dominio.com&user=1
-// - Si añades &user=1 también envía al deportista, simulando el correo de cortesía.
 app.get('/email-test', async (req, res) => {
   try {
     const to = (req.query.to || '').toString().trim();
     if (!to) return res.status(400).json({ ok: false, error: 'Falta ?to=correo@dominio' });
 
-    // Mensaje simple al staff (ADMIN_EMAIL)
-    const staffInfo = await transporter.sendMail({
-      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+    // staff
+    const staffInfo = await sendMail({
       to: ADMIN_EMAIL,
       subject: 'Test SALVA.COACH (staff)',
       html: `<p>Funciona el envío al staff ✅</p><p>Destino staff: ${ADMIN_EMAIL}</p>`
@@ -289,27 +323,20 @@ app.get('/email-test', async (req, res) => {
 
     let userInfo = null;
     if (String(req.query.user || '') === '1') {
-      userInfo = await transporter.sendMail({
-        from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      userInfo = await sendMail({
         to,
         subject: 'Test SALVA.COACH (usuario)',
         html: `<p>Hola 👋 Este es un test de correo de cortesía para el deportista.</p><p>Destino usuario: ${to}</p>`
       });
     }
 
-    console.log('📨 Test staff response:', staffInfo?.response);
-    if (userInfo) console.log('📨 Test user response:', userInfo?.response);
-
-    res.json({
-      ok: true,
-      staff: { envelope: staffInfo?.envelope, response: staffInfo?.response },
-      user: userInfo ? { envelope: userInfo?.envelope, response: userInfo?.response } : null
-    });
+    res.json({ ok: true, staff: staffInfo, user: userInfo });
   } catch (err) {
     console.error('❌ /email-test error:', err?.message || err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
 // ===== Arranque =====
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {

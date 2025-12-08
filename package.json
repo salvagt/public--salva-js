@@ -17,6 +17,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "nodemailer": "^7.0.11",
-    "openai": "^6.10.0"
+    "openai": "^6.10.0",
+    "resend": "^6.5.2"
   }
 }
