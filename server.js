@@ -47,12 +47,11 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   project: process.env.OPENAI_PROJECT
 });
+
 // ===== Crear mailer (MailerSend API > Resend API > SMTP fallback) =====
 let transporter = null;
 let resendClient = null;
-const USE_RESEND = !!process.env.RESEND_API_KEY;
 const USE_MAILERSEND = !!process.env.MAILERSEND_API_KEY;
-const FROM_EMAIL = SMTP_USER || ADMIN_EMAIL;
 
 if (USE_MAILERSEND) {
   console.log('📨 Mailer: MailerSend API activo');
@@ -115,23 +114,6 @@ async function sendMail({ to, subject, html }) {
     return { provider: 'smtp', response: info?.response || 'ok' };
   }
 
-  throw new Error('No email provider configured');
-}
-
-// Helper genérico de envío
-async function sendMail({ to, subject, html }) {
-  if (resendClient) {
-    // Resend HTTPS
-    const from = `${FROM_NAME} <${ADMIN_EMAIL}>`;
-    const resp = await resendClient.emails.send({ from, to, subject, html });
-    return { provider: 'resend', id: resp?.id };
-  }
-  if (transporter) {
-    // SMTP fallback
-    const from = `"${FROM_NAME}" <${FROM_EMAIL}>`;
-    const info = await transporter.sendMail({ from, to, subject, html });
-    return { provider: 'smtp', response: info?.response };
-  }
   throw new Error('No email provider configured');
 }
 
