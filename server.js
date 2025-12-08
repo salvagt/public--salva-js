@@ -1,13 +1,13 @@
-// server.js — SALVA.COACH con memoria + anti-bucle + emails (Resend API o SMTP como fallback)
+// server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend) + botón "Enviar resumen" on-demand
 require('dotenv').config({ override: false });
 const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const OpenAI = require('openai');
 
-// === Resend (API HTTPS, recomendado) ===
+// === Resend (API HTTPS, opcional) ===
 let Resend = null;
-try { Resend = require('resend').Resend; } catch (_) { /* no instalado aún */ }
+try { Resend = require('resend').Resend; } catch (_) { /* opcional */ }
 
 const app = express();
 app.use(cors());
@@ -18,13 +18,13 @@ const HAS_KEY = !!process.env.OPENAI_API_KEY;
 const HAS_PROJECT = !!process.env.OPENAI_PROJECT;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-// SMTP (fallback)
+// SMTP (fallback preferido por ti)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 
-// Resend (preferido)
+// Resend (si lo usas)
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const USE_RESEND = !!RESEND_API_KEY;
 
@@ -48,69 +48,41 @@ const client = new OpenAI({
   project: process.env.OPENAI_PROJECT
 });
 
-// ===== Crear mailer (MailerSend API > Resend API > SMTP fallback) =====
+// ===== Mailer unificado: Resend API → SMTP =====
 let transporter = null;
 let resendClient = null;
-const USE_MAILERSEND = !!process.env.MAILERSEND_API_KEY;
 
-if (USE_MAILERSEND) {
-  console.log('📨 Mailer: MailerSend API activo');
-} else if (USE_RESEND && Resend) {
-  resendClient = new Resend(process.env.RESEND_API_KEY);
+if (USE_RESEND && Resend) {
+  resendClient = new Resend(RESEND_API_KEY);
   console.log('📨 Mailer: Resend API activo');
 } else if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // 465 SSL; 587 STARTTLS negociado
+    secure: SMTP_PORT === 465, // 465 SSL; 587 STARTTLS
     auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
   console.log('📨 Mailer: SMTP (fallback) configurado');
 } else {
-  console.log('⚠️ Mailer: SIN proveedor activo (ni MAILERSEND_API_KEY, ni RESEND_API_KEY, ni SMTP_*)');
+  console.log('⚠️ Mailer: SIN proveedor activo (RESEND_API_KEY o SMTP_*)');
 }
 
-// Helper genérico de envío: MailerSend → Resend → SMTP
+// Helper de envío (prioridad: Resend → SMTP)
 async function sendMail({ to, subject, html }) {
   const fromName = FROM_NAME || 'SALVA.COACH';
-  const fromEmail = ADMIN_EMAIL; // “from” recomendado
+  const fromEmail = ADMIN_EMAIL;
 
-  // 1) MailerSend API (HTTPS)
-  if (USE_MAILERSEND) {
-    const resp = await fetch('https://api.mailersend.com/v1/email', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.MAILERSEND_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from: { email: fromEmail, name: fromName },
-        to: [{ email: to }],
-        subject,
-        html
-      })
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`MailerSend error: ${resp.status} ${text}`);
-    }
-    const data = await resp.json().catch(() => ({}));
-    return { provider: 'mailersend', id: data?.message_id || data?.id || 'ok' };
-  }
-
-  // 2) Resend API (si existe)
+  // 1) Resend
   if (resendClient) {
-    const from = `${fromName} <${fromEmail}>`;
-    const resp = await resendClient.emails.send({ from, to, subject, html });
+    const fromHeader = `${fromName} <${fromEmail}>`;
+    const resp = await resendClient.emails.send({ from: fromHeader, to, subject, html });
     return { provider: 'resend', id: resp?.id || 'ok' };
   }
 
-  // 3) SMTP fallback
+  // 2) SMTP
   if (transporter) {
-    const info = await transporter.sendMail({
-      from: `"${fromName}" <${FROM_EMAIL}>`,
-      to, subject, html
-    });
+    const fromHeader = `"${fromName}" <${SMTP_USER || fromEmail}>`;
+    const info = await transporter.sendMail({ from: fromHeader, to, subject, html });
     return { provider: 'smtp', response: info?.response || 'ok' };
   }
 
@@ -138,14 +110,21 @@ sessions: Map<sessionId, {
   history: {role:'user'|'assistant', content:string}[],
   packsRecommended: boolean,
   email: string|null,
-  summarySent: boolean
+  summarySent: boolean,        // si ya se ha enviado el resumen
+  summarySuggested: boolean    // si ya se sugirió el botón
 }>
 */
 const sessions = new Map();
 function getSession(id) {
   if (!id) return null;
   if (!sessions.has(id)) {
-    sessions.set(id, { history: [], packsRecommended: false, email: null, summarySent: false });
+    sessions.set(id, {
+      history: [],
+      packsRecommended: false,
+      email: null,
+      summarySent: false,
+      summarySuggested: false
+    });
   }
   return sessions.get(id);
 }
@@ -181,7 +160,7 @@ REGLAS:
 
 // ===== Utilidades =====
 function detectEmail(text) {
-  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);
   return m ? m[0] : null;
 }
 
@@ -195,7 +174,7 @@ function renderHistoryText(history, maxLines = 10) {
   const last = history.slice(-maxLines);
   return last
     .map(h => `${h.role === 'user' ? 'Deportista' : 'SALVA'}: ${h.content}`)
-    .join('\n');
+    .join('\\n');
 }
 
 // ===== Emails específicos (usan sendMail genérico) =====
@@ -255,7 +234,46 @@ async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
   });
 }
 
-// ===== API chat (memoria + anti-bucle + emails) =====
+// ===== API: enviar resumen ON-DEMAND (botón) =====
+app.post('/api/send-summary', async (req, res) => {
+  try {
+    const sessionId = (req.body?.session || '').toString().slice(0, 100);
+    const langQ = (req.query.lang || '').toString().toLowerCase();
+    const lang = langQ.startsWith('en') ? 'en' : 'es';
+
+    if (!sessionId) return res.status(400).json({ ok: false, error: 'missing_session' });
+
+    const state = getSession(sessionId);
+    if (!state) return res.status(404).json({ ok: false, error: 'session_not_found' });
+
+    // Si el usuario mete email en este momento, guárdalo
+    const maybeEmail = detectEmail(String(req.body?.email || ''));
+    if (maybeEmail && !state.email) state.email = maybeEmail;
+
+    // Enviar siempre al STAFF
+    await sendAdminSummary({
+      sessionId,
+      emailUser: state.email,
+      history: state.history
+    });
+
+    // Enviar al usuario (si hay email)
+    await sendUserReceipt({
+      emailUser: state.email,
+      history: state.history,
+      lang
+    });
+
+    state.summarySent = true;
+
+    return res.json({ ok: true, sentTo: { admin: ADMIN_EMAIL, user: !!state.email } });
+  } catch (err) {
+    console.error('❌ /api/send-summary error:', err?.message || err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// ===== API chat (memoria + anti-bucle + sugerencia de envío) =====
 app.post('/api/chat', async (req, res) => {
   try {
     const text = (req.body?.message || '').trim().slice(0, 4000);
@@ -276,10 +294,11 @@ app.post('/api/chat', async (req, res) => {
     const state = getSession(sessionId);
     state.history = trimHistory(state.history);
 
-    // Detectar correo
+    // Detectar correo en el mensaje
     const emailFound = detectEmail(text);
     if (emailFound && !state.email) {
       state.email = emailFound;
+      // No enviamos automáticamente: sólo cuando el usuario pulse el botón
       state.summarySent = false;
     }
 
@@ -306,11 +325,27 @@ app.post('/api/chat', async (req, res) => {
       messages
     });
 
-    const reply = completion.choices[0].message.content.trim();
+    let reply = (completion.choices?.[0]?.message?.content || '').trim();
 
     // Marcar recomendación de packs si procede
-    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium|quebrantahuesos|base\s*por|fuerza\s*espec/i.test(reply)) {
+    if (/pack\\s*(1\\s*a\\s*1|uno\\s*a\\s*uno)|premium|quebrantahuesos|base\\s*por|fuerza\\s*espec/i.test(reply)) {
       state.packsRecommended = true;
+    }
+
+    // Sugerir el botón "Enviar resumen" una sola vez, en buen momento
+    const shouldSuggest =
+      !!state.email &&
+      !state.summarySent &&
+      !state.summarySuggested &&
+      state.packsRecommended &&
+      state.history.length >= 4;
+
+    if (shouldSuggest) {
+      const line = (lang === 'en')
+        ? `\n\nIf you want, tap **Send summary** to receive the recap by email and I’ll also forward it to the coach. [[ENVIAR_RESUMEN]]`
+        : `\n\nSi quieres, pulsa **Enviar resumen** para recibir el resumen por email y yo lo mando también al entrenador. [[ENVIAR_RESUMEN]]`;
+      reply += line;
+      state.summarySuggested = true;
     }
 
     // Guardar historial
@@ -318,22 +353,15 @@ app.post('/api/chat', async (req, res) => {
     state.history.push({ role: 'assistant', content: reply });
     state.history = trimHistory(state.history);
 
-    // Envío de emails (una sola vez por sesión, cuando haya email)
-    if (state.email && !state.summarySent) {
-      state.summarySent = true;
-      // Enviar al staff y al deportista (no bloquear respuesta)
-      sendAdminSummary({ sessionId, emailUser: state.email, history: state.history }).catch(()=>{});
-      sendUserReceipt({ emailUser: state.email, history: state.history, lang }).catch(()=>{});
-    }
-
-    res.json({ reply });
+    // NO envío automático aquí (queda a botón /api/send-summary)
+    return res.json({ reply });
   } catch (err) {
     console.error('❌ Error /api/chat:', err?.message || err);
     res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
   }
 });
 
-// ===== Test rápido de correo =====
+// ===== Test rápido de correo SMTP (opcional) =====
 if (transporter && transporter.verify) {
   transporter.verify().then(() => {
     console.log('📨 SMTP listo para enviar');
