@@ -1,165 +1,117 @@
-// server.js — SALVA.COACH con memoria + anti-bucle + emails (SMTP/Resend)
-// + botón "Enviar resumen" on-demand y auto-envío en cierre
-require('dotenv').config({ override: false });
-const express = require('express');
-const cors = require('cors');
-const nodemailer = require('nodemailer');
-const OpenAI = require('openai');
+// server.js — SALVA.COACH con memoria + emails por SMTP (Hostinger)
+// Envío automático de resumen al cerrar la conversación.
 
-// === Resend (API HTTPS, opcional) ===
-let Resend = null;
-try { Resend = require('resend').Resend; } catch (_) { /* opcional */ }
+require("dotenv").config({ override: false });
+const express = require("express");
+const cors = require("cors");
+const nodemailer = require("nodemailer");
+const OpenAI = require("openai");
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+// ====================== CONFIG ENV ======================
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "salva@veloxtrem.com";
+const FROM_NAME = process.env.FROM_NAME || "SALVA.COACH";
 
-// ===== Config / ENV =====
-const HAS_KEY = !!process.env.OPENAI_API_KEY;
-const HAS_PROJECT = !!process.env.OPENAI_PROJECT;
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-// SMTP (fallback preferido)
 const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465", 10);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 
-// Resend (si lo usas)
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const USE_RESEND = !!RESEND_API_KEY;
-
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'salva@veloxtrem.com';
-const FROM_NAME = process.env.FROM_NAME || 'SALVA.COACH';
-const BOOKING_URL = process.env.BOOKING_URL || ''; // opcional
-const FROM_EMAIL = SMTP_USER || ADMIN_EMAIL; // from por defecto
-
-console.log('ENV CHECK =>', {
-  HAS_KEY,
-  HAS_PROJECT,
-  MODEL,
-  ADMIN_EMAIL,
-  HAS_SMTP: !!(SMTP_HOST && SMTP_USER && SMTP_PASS),
-  hasResend: !!RESEND_API_KEY
+console.log("ENV CHECK =>", {
+  hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+  hasProject: !!process.env.OPENAI_PROJECT,
+  model: MODEL,
+  adminEmail: ADMIN_EMAIL,
+  smtpHost: SMTP_HOST,
+  smtpUser: SMTP_USER,
 });
 
-// ===== OpenAI client =====
+// ====================== SMTP (SOLO) ======================
+if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+  console.log("⚠️  SMTP NO CONFIGURADO — revisa SMTP_HOST / SMTP_USER / SMTP_PASS en Render");
+}
+
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_PORT === 465,
+  auth: { user: SMTP_USER, pass: SMTP_PASS },
+});
+
+async function sendMail({ to, subject, html }) {
+  if (!transporter) throw new Error("SMTP no configurado");
+  const fromHeader = `"${FROM_NAME}" <${SMTP_USER}>`;
+  const info = await transporter.sendMail({ from: fromHeader, to, subject, html });
+  console.log("✉️ Email enviado:", info.response);
+  return info;
+}
+
+// ====================== CLIENTE OPENAI ===================
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  project: process.env.OPENAI_PROJECT
+  project: process.env.OPENAI_PROJECT,
 });
 
-// ===== Mailer unificado: Resend API → SMTP =====
-let transporter = null;
-let resendClient = null;
+// ====================== APP EXPRESS ======================
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
 
-if (USE_RESEND && Resend) {
-  resendClient = new Resend(RESEND_API_KEY);
-  console.log('📨 Mailer: Resend API activo');
-} else if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // 465 SSL; 587 STARTTLS
-    auth: { user: SMTP_USER, pass: SMTP_PASS }
-  });
-  console.log('📨 Mailer: SMTP (fallback) configurado');
-} else {
-  console.log('⚠️ Mailer: SIN proveedor activo (RESEND_API_KEY o SMTP_*)');
-}
+app.get("/health", (_req, res) => res.status(200).send("ok"));
 
-// Helper de envío (prioridad: Resend → SMTP)
-async function sendMail({ to, subject, html }) {
-  const fromName = FROM_NAME || 'SALVA.COACH';
-  const fromEmail = ADMIN_EMAIL;
-
-  // 1) Resend
-  if (resendClient) {
-    const fromHeader = `${fromName} <${fromEmail}>`;
-    const resp = await resendClient.emails.send({ from: fromHeader, to, subject, html });
-    return { provider: 'resend', id: resp?.id || 'ok' };
-  }
-
-  // 2) SMTP
-  if (transporter) {
-    const fromHeader = `"${fromName}" <${SMTP_USER || fromEmail}>`;
-    const info = await transporter.sendMail({ from: fromHeader, to, subject, html });
-    return { provider: 'smtp', response: info?.response || 'ok' };
-  }
-
-  throw new Error('No email provider configured');
-}
-
-// ===== Endpoints de diagnóstico =====
-app.get('/health', (_req, res) => res.status(200).send('ok'));
-app.get('/env-check', (_req, res) => {
-  res.json({
-    ok: true,
-    hasOpenAIKey: HAS_KEY,
-    hasOpenAIProject: HAS_PROJECT,
-    hasSMTP: !!(SMTP_HOST && SMTP_USER && SMTP_PASS),
-    hasResend: !!RESEND_API_KEY,
-    model: MODEL,
-    adminEmail: ADMIN_EMAIL
-  });
-});
-app.get('/', (_req, res) => res.send('✅ SALVA.COACH funcionando'));
-
-// ===== Memoria por sesión (RAM) =====
+// ====================== MEMORIA POR SESIÓN ===============
 /*
 sessions: Map<sessionId, {
   history: {role:'user'|'assistant', content:string}[],
-  packsRecommended: boolean,
   email: string|null,
-  summarySent: boolean,        // si ya se ha enviado el resumen (auto o botón)
-  summarySuggested: boolean    // si ya se sugirió el botón
+  summarySent: boolean
 }>
 */
 const sessions = new Map();
+
 function getSession(id) {
   if (!id) return null;
   if (!sessions.has(id)) {
     sessions.set(id, {
       history: [],
-      packsRecommended: false,
       email: null,
       summarySent: false,
-      summarySuggested: false
     });
   }
   return sessions.get(id);
 }
-function trimHistory(arr, max = 15) {
+
+function trimHistory(arr, max = 20) {
   return arr.length > max ? arr.slice(arr.length - max) : arr;
 }
 
-// ===== Prompt humano =====
+// ====================== PROMPT ===========================
 const SALVA_PROMPT = `
 Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Sé humano, cercano y profesional. Usa emojis solo cuando aporten calidez 😊🚴‍♂️💪.
 
 FLUJO:
 1) Saluda breve y pregunta objetivo, disponibilidad y nivel.
-2) Recomienda 1–2 packs máximo (prioriza 1 a 1 y Premium) cuando toque. No repitas packs.
-3) Si ya recomendaste, avanza: modo entrenador (técnica, estructura, fuerza, nutrición, descanso).
-4) En buen momento, pide email para enviar propuesta o ofrece llamada breve.
-5) Si ya tienes el email, confirma y sigue con pasos claros.
+2) Cuando proceda, recomienda máximo 1–2 packs (prioriza 1 a 1 y Premium). No repitas packs de forma insistente.
+3) Si ya recomendaste, entra en modo entrenador: técnica, estructura de entrenos, fuerza, nutrición, descanso.
+4) En un momento adecuado, pide email para enviar propuesta más detallada.
+5) Si ya tienes el email, confirma y da pasos claros siguientes.
 
 CATÁLOGO PRINCIPAL:
 - 🏅 1 a 1 VELOXTREM — 100 €/mes.
 - 🔥 Premium VELOXTREM — 150 €/mes.
 OTROS:
 - 🏔 QH 2026 — 399 € (24 semanas).
-- 💪 Base por FC — 8 (89 €) / 12 semanas (99 €).
+- 💪 Base por FC — 8 semanas (89 €) y 12 semanas (99 €).
 - ⚙️ Fuerza específica por vatios — 69 €.
 
 REGLAS:
-- Responde primero a la pregunta concreta del deportista.
-- Da 2–4 frases de valor.
-- Cierra con una sola pregunta para avanzar.
-- No repitas lo ya dicho.
+- Responde primero a la duda concreta del deportista.
+- Da 2–4 frases de valor real.
+- Cierra casi siempre con una sola pregunta que ayude a avanzar.
+- No repitas información que ya hayas dado salvo que el deportista lo pida.
 `;
 
-// ===== Utilidades =====
+// ====================== UTILIDADES =======================
 function detectEmail(text) {
   const m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return m ? m[0] : null;
@@ -167,251 +119,139 @@ function detectEmail(text) {
 
 function renderHistoryHTML(history) {
   return history
-    .map(h => `<p><b>${h.role === 'user' ? '👤 Deportista' : '🤖 SALVA'}</b>: ${h.content}</p>`)
-    .join('');
+    .map((h) => `<p><b>${h.role === "user" ? "👤 Deportista" : "🤖 SALVA"}</b>: ${h.content}</p>`)
+    .join("");
 }
 
-function renderHistoryText(history, maxLines = 10) {
-  const last = history.slice(-maxLines);
-  return last
-    .map(h => `${h.role === 'user' ? 'Deportista' : 'SALVA'}: ${h.content}`)
-    .join('\n');
-}
-
-// ===== Emails específicos (usan sendMail genérico) =====
+// ====================== EMAILS DE RESUMEN =================
 async function sendAdminSummary({ sessionId, emailUser, history }) {
   const html = `
     <h2>Nuevo contacto desde SALVA.COACH</h2>
     <p><b>Sesión:</b> ${sessionId}</p>
-    <p><b>Correo del deportista:</b> ${emailUser || '(no proporcionado)'}</p>
+    <p><b>Correo del deportista:</b> ${emailUser || "(no proporcionado)"}</p>
     <hr/>
     ${renderHistoryHTML(history)}
     <hr/>
     <p><i>Resumen automático – VELOXTREM</i></p>
   `;
-  const info = await sendMail({
+  await sendMail({
     to: ADMIN_EMAIL,
-    subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || 'sin correo'})`,
-    html
+    subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || "sin correo"})`,
+    html,
   });
-  console.log('✉️ sendAdminSummary ->', info);
 }
 
-async function sendUserReceipt({ emailUser, history, lang = 'es' }) {
+async function sendUserReceipt({ emailUser, history }) {
   if (!emailUser) return;
-  const intro =
-    lang === 'en'
-      ? `Thanks for contacting SALVA.COACH! Here's a summary of our conversation. I’ll get back to you shortly.`
-      : `¡Gracias por contactar con SALVA.COACH! Aquí tienes un resumen de nuestra conversación. Te escribiré en breve.`;
-  const next =
-    lang === 'en'
-      ? `Next steps: I’ll review your info and propose a plan.`
-      : `Siguientes pasos: revisaré tu info y te propondré un plan.`;
-  const book =
-    BOOKING_URL
-      ? (lang === 'en'
-          ? `If you prefer, book a quick call here: ${BOOKING_URL}`
-          : `Si prefieres, agenda una llamada breve aquí: ${BOOKING_URL}`)
-      : '';
-  const privacy =
-    lang === 'en'
-      ? `Privacy: we only email a single summary when you request it.`
-      : `Privacidad: sólo enviamos un único resumen cuando tú lo solicitas.`;
+  const textSummary = history
+    .slice(-10)
+    .map((h) => `${h.role === "user" ? "Deportista" : "SALVA"}: ${h.content}`)
+    .join("\n");
 
-  const textSummary = renderHistoryText(history, 10);
   const html = `
-    <p>${intro}</p>
+    <p>¡Gracias por contactar con SALVA.COACH! Aquí tienes un resumen de nuestra conversación.</p>
     <pre style="background:#f6f7f9;padding:12px;border-radius:8px;white-space:pre-wrap;">${textSummary}</pre>
-    <p>${next}</p>
-    ${book ? `<p>${book}</p>` : ''}
-    <p>${privacy}</p>
+    <p>Siguientes pasos: revisaré tu información y, si procede, te propondré un plan más detallado.</p>
     <p>— ${FROM_NAME} · VELOXTREM</p>
   `;
-  const info = await sendMail({
+  await sendMail({
     to: emailUser,
-    subject: (lang === 'en'
-      ? 'Your SALVA.COACH summary'
-      : 'Tu resumen de la conversación con SALVA.COACH'),
-    html
+    subject: "Tu resumen de la conversación con SALVA.COACH",
+    html,
   });
-  console.log('✉️ sendUserReceipt ->', info);
 }
 
-// ===== API: enviar resumen ON-DEMAND (botón) =====
-app.post('/api/send-summary', async (req, res) => {
+// ====================== TEST SMTP ========================
+app.get("/email-test", async (_req, res) => {
   try {
-    const sessionId = (req.body?.session || '').toString().slice(0, 100);
-    const langQ = (req.query.lang || '').toString().toLowerCase();
-    const lang = langQ.startsWith('en') ? 'en' : 'es';
-
-    if (!sessionId) return res.status(400).json({ ok: false, error: 'missing_session' });
-
-    const state = getSession(sessionId);
-    if (!state) return res.status(404).json({ ok: false, error: 'session_not_found' });
-
-    // Posible email proporcionado explícitamente en el click
-    const maybeEmail = detectEmail(String(req.body?.email || ''));
-    if (maybeEmail && !state.email) state.email = maybeEmail;
-
-    await sendAdminSummary({ sessionId, emailUser: state.email, history: state.history });
-    await sendUserReceipt({ emailUser: state.email, history: state.history, lang });
-
-    state.summarySent = true;
-
-    console.log('✅ /api/send-summary enviado ->', { admin: ADMIN_EMAIL, user: !!state.email, sessionId });
-    return res.json({ ok: true, sentTo: { admin: ADMIN_EMAIL, user: !!state.email } });
+    await sendMail({
+      to: ADMIN_EMAIL,
+      subject: "Test — SALVA.COACH SMTP",
+      html: "<p>Correo test enviado correctamente al ADMIN_EMAIL.</p>",
+    });
+    res.json({ ok: true, to: ADMIN_EMAIL });
   } catch (err) {
-    console.error('❌ /api/send-summary error:', err?.message || err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("❌ /email-test:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// ===== API chat (memoria + anti-bucle + sugerencia de envío + auto-cierre) =====
-app.post('/api/chat', async (req, res) => {
+// ====================== API CHAT =========================
+app.post("/api/chat", async (req, res) => {
   try {
-    const text = (req.body?.message || '').trim().slice(0, 4000);
-    const sessionId = (req.body?.session || '').toString().slice(0, 100);
-    if (!text) return res.json({ reply: '¿En qué puedo ayudarte? 🙂' });
+    const text = (req.body?.message || "").trim().slice(0, 4000);
+    const sessionId = (req.body?.session || "").toString().slice(0, 100);
 
-    // Idioma
-    const langQ = (req.query.lang || '').toString().toLowerCase();
-    let lang = langQ.startsWith('en') ? 'en' : (langQ.startsWith('es') ? 'es' : '');
-    if (!lang) lang = /[a-záéíóúñü¿¡]/i.test(text) ? 'es' : 'en';
-    const prefix = lang === 'en' ? 'Answer in English. ' : 'Responde en español. ';
+    if (!text) return res.json({ reply: "¿En qué puedo ayudarte? 🙂" });
+    if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_PROJECT) {
+      return res.status(500).json({ error: "config_error", detail: "Falta OPENAI_API_KEY o OPENAI_PROJECT" });
+    }
 
-    // Credenciales
-    if (!HAS_KEY) return res.status(500).json({ error: 'missing_api_key', detail: 'Falta OPENAI_API_KEY' });
-    if (!HAS_PROJECT) return res.status(500).json({ error: 'missing_project', detail: 'Falta OPENAI_PROJECT' });
-
-    // Sesión
-    const state = getSession(sessionId);
+    const state = getSession(sessionId || "default");
     state.history = trimHistory(state.history);
 
-    // Detectar correo en el mensaje
+    // Detectar email en el mensaje
     const emailFound = detectEmail(text);
     if (emailFound && !state.email) {
       state.email = emailFound;
       state.summarySent = false;
-      console.log('📧 Email detectado en chat:', state.email);
+      console.log("📧 Email detectado:", state.email);
     }
 
-    // Anti-bucle dinámico
-    const ANTI_LOOP = state.packsRecommended
-      ? (lang === 'en'
-        ? 'Note: packs already recommended; do not repeat them unless asked. Advance naturally: coach mode, next steps, ask for email or propose a short call.'
-        : 'Nota: ya se recomendaron packs; no los repitas salvo que te lo pidan. Avanza de forma natural: modo entrenador, siguientes pasos, pide email o propone llamada breve.')
-      : (lang === 'en'
-        ? 'If you recommend packs, do it once (1–2). After that, do not repeat.'
-        : 'Si recomiendas packs, hazlo una vez (1–2). Después, no repitas.');
-
-    // Mensajes a OpenAI (memoria corta)
     const messages = [
-      { role: 'system', content: SALVA_PROMPT + '\n' + ANTI_LOOP },
-      ...state.history.map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: prefix + text }
+      { role: "system", content: SALVA_PROMPT },
+      ...state.history.map((h) => ({ role: h.role, content: h.content })),
+      { role: "user", content: text },
     ];
 
     const completion = await client.chat.completions.create({
       model: MODEL,
       temperature: 0.7,
       top_p: 0.9,
-      messages
+      messages,
     });
 
-    let reply = (completion.choices?.[0]?.message?.content || '').trim();
-
-    // Marcar recomendación de packs si procede
-    if (/pack\s*(1\s*a\s*1|uno\s*a\s*uno)|premium|quebrantahuesos|base\s*por|fuerza\s*espec/i.test(reply)) {
-      state.packsRecommended = true;
-    }
-
-    // Sugerir el botón "Enviar resumen" una sola vez, en buen momento
-    const shouldSuggest =
-      !!state.email &&
-      !state.summarySent &&
-      !state.summarySuggested &&
-      state.packsRecommended &&
-      state.history.length >= 4;
-
-    if (shouldSuggest) {
-      const line = (lang === 'en')
-        ? `\n\nIf you want, tap **Send summary** to receive the recap by email and I’ll also forward it to the coach. [[ENVIAR_RESUMEN]]`
-        : `\n\nSi quieres, pulsa **Enviar resumen** para recibir el resumen por email y yo lo mando también al entrenador. [[ENVIAR_RESUMEN]]`;
-      reply += line;
-      state.summarySuggested = true;
-    }
+    let reply = (completion.choices?.[0]?.message?.content || "").trim();
 
     // Guardar historial
-    state.history.push({ role: 'user', content: text });
-    state.history.push({ role: 'assistant', content: reply });
+    state.history.push({ role: "user", content: text });
+    state.history.push({ role: "assistant", content: reply });
     state.history = trimHistory(state.history);
 
-    // === AUTO-ENVÍO AL DETECTAR CIERRE ===
-    const closing = /(gracias|perfecto|genial|ok|de acuerdo|hablamos|listo|vale|hasta luego|buenas noches|nos vemos)\b/i.test(text);
-    if (state.email && !state.summarySent && state.packsRecommended && closing) {
+    // Palabras de cierre (siempre envía resumen al staff)
+    const closingWords =
+      /\b(gracias|perfecto|genial|ok|vale|de acuerdo|hablamos|listo|hasta luego|buenas noches|nos vemos|adiós|bye|thanks|thank you)\b/i;
+    const closing = closingWords.test(text);
+
+    if (closing && !state.summarySent) {
       try {
-        await sendAdminSummary({ sessionId, emailUser: state.email, history: state.history });
-        await sendUserReceipt({ emailUser: state.email, history: state.history, lang });
+        await sendAdminSummary({ sessionId: sessionId || "default", emailUser: state.email, history: state.history });
+        await sendUserReceipt({ emailUser: state.email, history: state.history });
         state.summarySent = true;
-        const notice = (lang === 'en')
-          ? `\n\n✅ I’ve emailed you the summary and forwarded it to the coach.`
-          : `\n\n✅ Te acabo de enviar el resumen por email y lo he remitido al entrenador.`;
-        reply += notice;
-        // Actualiza último mensaje en historial
+
+        reply += state.email
+          ? "\n\n✅ He enviado el resumen a tu correo y al entrenador."
+          : "\n\n✅ He enviado el resumen de esta conversación al entrenador VELOXTREM.";
+
         state.history[state.history.length - 1].content = reply;
-        console.log('✅ Auto-summary enviado (cierre detectado):', { sessionId, userEmail: state.email });
+        console.log("✅ Resumen auto-enviado:", {
+          sessionId: sessionId || "default",
+          userEmail: state.email || "(sin email)",
+        });
       } catch (e) {
-        console.error('❌ auto-send summary error:', e?.message || e);
+        console.error("❌ Error enviando resumen:", e.message);
       }
     }
-    // === FIN AUTO-ENVÍO ===
 
     return res.json({ reply });
   } catch (err) {
-    console.error('❌ Error /api/chat:', err?.message || err);
-    res.status(500).json({ error: 'chat_error', detail: String(err?.message || err) });
+    console.error("❌ Error /api/chat:", err.message);
+    res.status(500).json({ error: "chat_error", detail: err.message });
   }
 });
 
-// ===== Test rápido de correo SMTP (opcional) =====
-if (transporter && transporter.verify) {
-  transporter.verify().then(() => {
-    console.log('📨 SMTP listo para enviar');
-  }).catch(err => {
-    console.error('❌ SMTP verify error:', err?.message || err);
-  });
-}
-
-app.get('/email-test', async (req, res) => {
-  try {
-    const to = (req.query.to || '').toString().trim();
-    if (!to) return res.status(400).json({ ok: false, error: 'Falta ?to=correo@dominio' });
-
-    // staff
-    const staffInfo = await sendMail({
-      to: ADMIN_EMAIL,
-      subject: 'Test SALVA.COACH (staff)',
-      html: `<p>Funciona el envío al staff ✅</p><p>Destino staff: ${ADMIN_EMAIL}</p>`
-    });
-
-    let userInfo = null;
-    if (String(req.query.user || '') === '1') {
-      userInfo = await sendMail({
-        to,
-        subject: 'Test SALVA.COACH (usuario)',
-        html: `<p>Hola 👋 Este es un test de correo de cortesía para el deportista.</p><p>Destino usuario: ${to}</p>`
-      });
-    }
-
-    res.json({ ok: true, staff: staffInfo, user: userInfo });
-  } catch (err) {
-    console.error('❌ /email-test error:', err?.message || err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-// ===== Arranque =====
+// ====================== ARRANQUE =========================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Servidor activo en puerto ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 SALVA.COACH activo en puerto ${PORT}`);
 });
