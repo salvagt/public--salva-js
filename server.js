@@ -1,57 +1,30 @@
-// server.js — SALVA.COACH con memoria + emails por SMTP (Hostinger)
-// Envío automático de resumen al cerrar la conversación.
+// server.js — SALVA.COACH con memoria + emails vía webhook (Google Apps Script)
 
+// Carga .env localmente (en Render no hace nada malo)
 require("dotenv").config({ override: false });
+
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 
 // ====================== CONFIG ENV ======================
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "salva@veloxtrem.com";
 const FROM_NAME = process.env.FROM_NAME || "SALVA.COACH";
-
-const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465", 10);
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
+const MAIL_WEBHOOK_URL = process.env.MAIL_WEBHOOK_URL; // URL de Apps Script
 
 console.log("ENV CHECK =>", {
   hasOpenAIKey: !!process.env.OPENAI_API_KEY,
   hasProject: !!process.env.OPENAI_PROJECT,
   model: MODEL,
   adminEmail: ADMIN_EMAIL,
-  smtpHost: SMTP_HOST,
-  smtpUser: SMTP_USER,
+  hasWebhook: !!MAIL_WEBHOOK_URL
 });
-
-// ====================== SMTP (SOLO) ======================
-let transporter = null;
-
-if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
-  console.log("⚠️  SMTP NO CONFIGURADO — revisa SMTP_HOST / SMTP_USER / SMTP_PASS en Render");
-} else {
-  transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-}
-
-async function sendMail({ to, subject, html }) {
-  if (!transporter) throw new Error("SMTP no configurado");
-  const fromHeader = `"${FROM_NAME}" <${SMTP_USER}>`;
-  const info = await transporter.sendMail({ from: fromHeader, to, subject, html });
-  console.log("✉️ Email enviado:", info.response);
-  return info;
-}
 
 // ====================== CLIENTE OPENAI ===================
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  project: process.env.OPENAI_PROJECT,
+  project: process.env.OPENAI_PROJECT
 });
 
 // ====================== APP EXPRESS ======================
@@ -77,7 +50,7 @@ function getSession(id) {
     sessions.set(id, {
       history: [],
       email: null,
-      summarySent: false,
+      summarySent: false
     });
   }
   return sessions.get(id);
@@ -98,10 +71,9 @@ FLUJO GENERAL:
    - Tipo de ciclismo (carretera, MTB, gravel, mixto…)
    - Disponibilidad semanal aproximada
    - Correo electrónico de contacto
-   Debes hacerlo pronto, NO lo retrases al final de la conversación.
 3) Cuando proceda, recomienda máximo 1–2 packs (prioriza 1 a 1 y Premium). No repitas packs de forma insistente.
 4) Si ya recomendaste, entra en modo entrenador: técnica, estructura de entrenos, fuerza, nutrición, descanso, mentalidad.
-5) Si ya tienes el email, confirma y da 1–3 pasos claros siguientes (por ejemplo: revisar datos, enviar propuesta, posible llamada rápida).
+5) Si ya tienes el email, confirma y da 1–3 pasos claros siguientes.
 
 CATÁLOGO PRINCIPAL:
 - 🏅 1 a 1 VELOXTREM — 100 €/mes.
@@ -116,7 +88,6 @@ REGLAS:
 - Da 2–4 frases de valor real.
 - Cierra casi siempre con una sola pregunta que ayude a avanzar.
 - No repitas información que ya hayas dado salvo que el deportista lo pida.
-- No sigas hablando de packs si ya los has recomendado una vez.
 `;
 
 // ====================== UTILIDADES =======================
@@ -131,7 +102,32 @@ function renderHistoryHTML(history) {
     .join("");
 }
 
-// ====================== EMAILS DE RESUMEN =================
+// ====================== ENVÍO DE EMAIL POR WEBHOOK =======
+async function sendMail({ to, subject, html }) {
+  if (!MAIL_WEBHOOK_URL) {
+    console.log("⚠️ MAIL_WEBHOOK_URL no definido. Email SIMULADO:", { to, subject });
+    return { ok: false, simulated: true };
+  }
+
+  const payload = {
+    to,
+    subject,
+    html,
+    fromName: FROM_NAME
+  };
+
+  const resp = await fetch(MAIL_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await resp.text();
+  console.log("Respuesta webhook Gmail:", text);
+
+  return { ok: resp.ok };
+}
+
 async function sendAdminSummary({ sessionId, emailUser, history }) {
   const html = `
     <h2>Nuevo contacto desde SALVA.COACH</h2>
@@ -145,7 +141,7 @@ async function sendAdminSummary({ sessionId, emailUser, history }) {
   await sendMail({
     to: ADMIN_EMAIL,
     subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || "sin correo"})`,
-    html,
+    html
   });
 }
 
@@ -165,17 +161,17 @@ async function sendUserReceipt({ emailUser, history }) {
   await sendMail({
     to: emailUser,
     subject: "Tu resumen de la conversación con SALVA.COACH",
-    html,
+    html
   });
 }
 
-// ====================== TEST SMTP ========================
+// ====================== TEST EMAIL =======================
 app.get("/email-test", async (_req, res) => {
   try {
     await sendMail({
       to: ADMIN_EMAIL,
-      subject: "Test — SALVA.COACH SMTP",
-      html: "<p>Correo test enviado correctamente al ADMIN_EMAIL.</p>",
+      subject: "Test — SALVA.COACH webhook",
+      html: "<p>Correo test enviado correctamente mediante Gmail Apps Script.</p>"
     });
     res.json({ ok: true, to: ADMIN_EMAIL });
   } catch (err) {
@@ -198,7 +194,6 @@ app.post("/api/chat", async (req, res) => {
     const state = getSession(sessionId || "default");
     state.history = trimHistory(state.history);
 
-    // Detectar email en el mensaje
     const emailFound = detectEmail(text);
     if (emailFound && !state.email) {
       state.email = emailFound;
@@ -209,38 +204,35 @@ app.post("/api/chat", async (req, res) => {
     const messages = [
       { role: "system", content: SALVA_PROMPT },
       ...state.history.map((h) => ({ role: h.role, content: h.content })),
-      { role: "user", content: text },
+      { role: "user", content: text }
     ];
 
     const completion = await client.chat.completions.create({
       model: MODEL,
       temperature: 0.7,
       top_p: 0.9,
-      messages,
+      messages
     });
 
     let reply = (completion.choices?.[0]?.message?.content || "").trim();
 
-    // Guardar historial
     state.history.push({ role: "user", content: text });
     state.history.push({ role: "assistant", content: reply });
     state.history = trimHistory(state.history);
 
-    // Palabras de cierre (solo envía resumen al entrenador)
     const closingWords =
       /\b(gracias|perfecto|genial|ok|vale|de acuerdo|hablamos|listo|hasta luego|buenas noches|nos vemos|adiós|bye|thanks|thank you)\b/i;
     const closing = closingWords.test(text);
 
     if (closing && !state.summarySent) {
       try {
-        // Siempre enviar el resumen completo al entrenador
         await sendAdminSummary({
           sessionId: sessionId || "default",
           emailUser: state.email,
-          history: state.history,
+          history: state.history
         });
 
-        // Si en el futuro quieres enviar también al deportista, descomenta esta línea:
+        // Si quieres también enviar al deportista, descomenta:
         // await sendUserReceipt({ emailUser: state.email, history: state.history });
 
         state.summarySent = true;
@@ -248,9 +240,9 @@ app.post("/api/chat", async (req, res) => {
         reply += "\n\n✅ He enviado el resumen de esta conversación al entrenador VELOXTREM.";
         state.history[state.history.length - 1].content = reply;
 
-        console.log("✅ Resumen auto-enviado al entrenador:", {
+        console.log("✅ Resumen auto-enviado al entrenador (webhook):", {
           sessionId: sessionId || "default",
-          userEmail: state.email || "(sin email)",
+          userEmail: state.email || "(sin email)"
         });
       } catch (e) {
         console.error("❌ Error enviando resumen:", e.message);
