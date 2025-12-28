@@ -27,16 +27,18 @@ console.log("ENV CHECK =>", {
 });
 
 // ====================== SMTP (SOLO) ======================
+let transporter = null;
+
 if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
   console.log("⚠️  SMTP NO CONFIGURADO — revisa SMTP_HOST / SMTP_USER / SMTP_PASS en Render");
+} else {
+  transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
 }
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_PORT === 465,
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-});
 
 async function sendMail({ to, subject, html }) {
   if (!transporter) throw new Error("SMTP no configurado");
@@ -86,7 +88,6 @@ function trimHistory(arr, max = 20) {
 }
 
 // ====================== PROMPT ===========================
-
 const SALVA_PROMPT = `
 Eres SALVA.COACH, entrenador de ciclismo de VELOXTREM. Sé humano, cercano y profesional. Usa emojis solo cuando aporten calidez 😊🚴‍♂️💪.
 
@@ -143,7 +144,7 @@ async function sendAdminSummary({ sessionId, emailUser, history }) {
   `;
   await sendMail({
     to: ADMIN_EMAIL,
-    subject: \`💬 Nuevo contacto - SALVA.COACH (\${emailUser || "sin correo"})\`,
+    subject: `💬 Nuevo contacto - SALVA.COACH (${emailUser || "sin correo"})`,
     html,
   });
 }
@@ -152,8 +153,8 @@ async function sendUserReceipt({ emailUser, history }) {
   if (!emailUser) return;
   const textSummary = history
     .slice(-10)
-    .map((h) => \`\${h.role === "user" ? "Deportista" : "SALVA"}: \${h.content}\`)
-    .join("\\n");
+    .map((h) => `${h.role === "user" ? "Deportista" : "SALVA"}: ${h.content}`)
+    .join("\n");
 
   const html = `
     <p>¡Gracias por contactar con SALVA.COACH! Aquí tienes un resumen de nuestra conversación.</p>
@@ -225,21 +226,21 @@ app.post("/api/chat", async (req, res) => {
     state.history.push({ role: "assistant", content: reply });
     state.history = trimHistory(state.history);
 
-    // Palabras de cierre (solo envia resumen al entrenador)
+    // Palabras de cierre (solo envía resumen al entrenador)
     const closingWords =
       /\b(gracias|perfecto|genial|ok|vale|de acuerdo|hablamos|listo|hasta luego|buenas noches|nos vemos|adiós|bye|thanks|thank you)\b/i;
     const closing = closingWords.test(text);
 
     if (closing && !state.summarySent) {
       try {
-        // 1) Siempre enviar el resumen completo al entrenador
+        // Siempre enviar el resumen completo al entrenador
         await sendAdminSummary({
           sessionId: sessionId || "default",
           emailUser: state.email,
           history: state.history,
         });
 
-        // 2) Si más adelante quieres enviar también al deportista, descomenta esta línea:
+        // Si en el futuro quieres enviar también al deportista, descomenta esta línea:
         // await sendUserReceipt({ emailUser: state.email, history: state.history });
 
         state.summarySent = true;
